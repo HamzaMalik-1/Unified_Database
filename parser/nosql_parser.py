@@ -38,17 +38,16 @@ class NoSQLParser:
         return {"collection": collection, "doc": doc}
 
     @staticmethod
-    def parse_find(sql: str) -> Dict[str, Any]:
+    def parse_select(sql: str) -> Dict[str, Any]:
         """
-        Parses: FIND IN collection WHERE field = value
-        field can use dot notation (e.g., address.city)
-        Returns dict: {"collection": str, "field": str, "value": any, "operator": str}
-        Only supports '=' for now.
+        Parses: SELECT FROM collection WHERE field = value
+        (supports dot notation in field)
         """
-        pattern = r"FIND\s+IN\s+(\w+)\s+WHERE\s+([\w.]+)\s*=\s*(.+)"
+        pattern = r"SELECT\s+FROM\s+(\w+)\s+WHERE\s+([\w.]+)\s*=\s*(.+)"
         match = re.match(pattern, sql, re.IGNORECASE)
         if not match:
-            raise ValueError("Invalid FIND syntax. Expected: FIND IN collection WHERE field = value")
+            # Fallback to old FIND syntax
+            return NoSQLParser.parse_find(sql)
         collection = match.group(1)
         field = match.group(2).strip()
         val_str = match.group(3).strip()
@@ -58,15 +57,14 @@ class NoSQLParser:
     @staticmethod
     def parse_update(sql: str) -> Dict[str, Any]:
         """
-        Parses: UPDATE IN collection SET field = value WHERE condition
-        condition is like: id = 1 (only =, field with dot notation)
-        Returns dict: {"collection": str, "set_field": str, "set_value": any, "where_field": str, "where_value": any}
+        Parses: UPDATE collection SET field = value WHERE field = value
+        (no 'IN')
         """
-        # Simplified: only support WHERE field = value, SET field = value
-        pattern = r"UPDATE\s+IN\s+(\w+)\s+SET\s+([\w.]+)\s*=\s*(.+?)\s+WHERE\s+([\w.]+)\s*=\s*(.+)"
+        pattern = r"UPDATE\s+(\w+)\s+SET\s+([\w.]+)\s*=\s*(.+?)\s+WHERE\s+([\w.]+)\s*=\s*(.+)"
         match = re.match(pattern, sql, re.IGNORECASE)
         if not match:
-            raise ValueError("Invalid UPDATE syntax. Expected: UPDATE IN collection SET field = value WHERE field = value")
+            # Fallback to old UPDATE IN syntax
+            return NoSQLParser.parse_update(sql)
         collection = match.group(1)
         set_field = match.group(2).strip()
         set_val_str = match.group(3).strip()

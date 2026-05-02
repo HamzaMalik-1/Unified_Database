@@ -18,9 +18,11 @@ class NoSQLDatabase:
             return self._create_collection(command)
         elif cmd_upper.startswith("INSERT INTO"):
             return self._insert(command)
-        elif cmd_upper.startswith("FIND IN"):
-            return self._find(command)
-        elif cmd_upper.startswith("UPDATE IN"):
+        elif cmd_upper.startswith("SELECT FROM"):
+            return self._select(command)  
+        elif cmd_upper.startswith("UPDATE "):
+            # Check if it's UPDATE (without IN) – we need to distinguish from UPDATE IN (old)
+            # We'll call a unified method
             return self._update(command)
         elif cmd_upper.startswith("DELETE FROM"):
             return self._delete(command)
@@ -55,26 +57,27 @@ class NoSQLDatabase:
             logger.error(f"INSERT failed: {e}")
             return f"Error: {e}"
 
-    def _find(self, sql: str) -> str:
+    def _select(self, sql: str) -> str:
+        """Handles SELECT FROM collection WHERE field = value (dot notation supported)"""
         try:
-            parsed = NoSQLParser.parse_find(sql)
+            parsed = NoSQLParser.parse_select(sql)
             coll = parsed["collection"]
-            field = parsed["field"]  # dot notation, e.g., "address.city"
+            field = parsed["field"]
             value = parsed["value"]
             if coll not in self.storage.data['collections']:
                 return f"Error: Collection '{coll}' does not exist"
             results = []
             for doc in self.storage.data['collections'][coll]:
-                doc_val = self._get_nested(doc, field)
-                if doc_val == value:
+                if self._get_nested(doc, field) == value:
                     results.append(doc)
             import json
             return json.dumps(results, indent=2, default=str)
         except Exception as e:
-            logger.error(f"FIND failed: {e}")
+            logger.error(f"SELECT failed: {e}")
             return f"Error: {e}"
 
     def _update(self, sql: str) -> str:
+        """Handles UPDATE collection SET field = value WHERE field = value (no 'IN')"""
         try:
             parsed = NoSQLParser.parse_update(sql)
             coll = parsed["collection"]
@@ -86,9 +89,7 @@ class NoSQLDatabase:
                 return f"Error: Collection '{coll}' does not exist"
             updated = 0
             for doc in self.storage.data['collections'][coll]:
-                doc_where_val = self._get_nested(doc, where_field)
-                if doc_where_val == where_value:
-                    # Update nested field
+                if self._get_nested(doc, where_field) == where_value:
                     self._set_nested(doc, set_field, set_value)
                     updated += 1
             self.storage.save()
