@@ -194,3 +194,70 @@ class SQLParser:
             "group_by": group_by,
             "having": having
         }
+        
+        
+        
+        
+    @staticmethod
+    def parse_update(sql: str) -> Dict[str, Any]:
+        """
+        Parses: UPDATE table_name SET col1 = val1, col2 = val2 [WHERE condition]
+        Returns dict: {"table": str, "set": Dict[str, Any], "where": Optional[str]}
+        """
+        sql = sql.strip()
+        # Pattern: UPDATE table SET assignments [WHERE condition]
+        pattern = r"UPDATE\s+(\w+)\s+SET\s+(.+?)(?:\s+WHERE\s+(.+))?$"
+        match = re.match(pattern, sql, re.IGNORECASE)
+        if not match:
+            raise ValueError("Invalid UPDATE syntax. Expected: UPDATE table SET col=val, ... [WHERE condition]")
+        table_name = match.group(1)
+        set_part = match.group(2).strip()
+        where_cond = match.group(3).strip() if match.group(3) else None
+
+        # Parse assignments: col = value, col = value
+        assignments = {}
+        parts = set_part.split(',')
+        for part in parts:
+            if '=' not in part:
+                raise ValueError(f"Invalid SET clause: '{part}'")
+            col, val_str = part.split('=', 1)
+            col = col.strip()
+            val_str = val_str.strip()
+            # Convert value to appropriate type
+            if val_str.upper() == "NULL":
+                assignments[col] = None
+            elif val_str.startswith("'") and val_str.endswith("'"):
+                assignments[col] = val_str[1:-1]
+            elif val_str.isdigit():
+                assignments[col] = int(val_str)
+            else:
+                try:
+                    assignments[col] = float(val_str)
+                except:
+                    assignments[col] = val_str
+        return {"table": table_name, "set": assignments, "where": where_cond}
+
+    @staticmethod
+    def parse_delete(sql: str) -> Dict[str, Any]:
+        """
+        Parses: DELETE FROM table_name [WHERE condition]
+        Returns dict: {"table": str, "where": Optional[str]}
+        """
+        sql = sql.strip()
+        pattern = r"DELETE\s+FROM\s+(\w+)(?:\s+WHERE\s+(.+))?$"
+        match = re.match(pattern, sql, re.IGNORECASE)
+        if not match:
+            raise ValueError("Invalid DELETE syntax. Expected: DELETE FROM table [WHERE condition]")
+        table_name = match.group(1)
+        where_cond = match.group(2).strip() if match.group(2) else None
+        return {"table": table_name, "where": where_cond}
+
+    @staticmethod
+    def parse_drop_table(sql: str) -> str:
+        """Parses: DROP TABLE table_name, returns table name."""
+        sql = sql.strip()
+        pattern = r"DROP\s+TABLE\s+(\w+)"
+        match = re.match(pattern, sql, re.IGNORECASE)
+        if not match:
+            raise ValueError("Invalid DROP TABLE syntax. Expected: DROP TABLE table_name")
+        return match.group(1)

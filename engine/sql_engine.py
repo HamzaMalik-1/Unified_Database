@@ -18,6 +18,12 @@ class SQLDatabase:
             return self._insert(command)
         elif cmd_upper.startswith("SELECT"):
             return self._select(command)  
+        elif cmd_upper.startswith("UPDATE"):
+            return self._update(command)
+        elif cmd_upper.startswith("DELETE FROM"):
+            return self._delete(command)
+        elif cmd_upper.startswith("DROP TABLE"):
+            return self._drop_table(command)
         else:
             return f"Unsupported SQL command: {command}"
 
@@ -343,4 +349,99 @@ class SQLDatabase:
             return json.dumps(rows, indent=2, default=str)
         except Exception as e:
             logger.error(f"SELECT failed: {e}")
+            return f"Error: {e}"
+        
+    def _update(self, sql: str) -> str:
+        try:
+            parsed = SQLParser.parse_update(sql)
+            table_name = parsed["table"]
+            set_assignments = parsed["set"]
+            where_cond = parsed["where"]
+
+            schema = self.storage.get_schema(table_name)
+            if not schema:
+                return f"Error: Table '{table_name}' does not exist"
+            rows = self.storage.get_table_data(table_name)
+            if not rows:
+                return "Update completed (0 rows affected)"
+
+            # Validate column existence and types
+            schema_cols = {col["name"]: col for col in schema}
+            for col in set_assignments.keys():
+                if col not in schema_cols:
+                    return f"Error: Column '{col}' does not exist in table '{table_name}'"
+
+            updated_count = 0
+            for row in rows:
+                # Check WHERE condition (if any)
+                if where_cond and not self._evaluate_condition(row, where_cond):
+                    continue
+                # Apply updates
+                for col, val in set_assignments.items():
+                    col_def = schema_cols[col]
+                    # Validate data type
+                    try:
+                        typed_val = DataType.validate(val, col_def["type"]) if val is not None else None
+                    except ValueError as e:
+                        return f"Error in column '{col}': {e}"
+                    # Check NOT NULL constraint if the column is being updated to NULL
+                    if typed_val is None and "NOT NULL" in col_def["constraints"]:
+                        return f"Error: Column '{col}' cannot be NULL"
+                    row[col] = typed_val
+                updated_count += 1
+            # Persist changes
+            self.storage.set_table_data(table_name, rows)
+            logger.info(f"Updated {updated_count} row(s) in '{table_name}'")
+            return f"Update successful. {updated_count} row(s) affected."
+        except Exception as e:
+            logger.error(f"UPDATE failed: {e}")
+            return f"Error: {e}"
+
+    def _delete(self, sql: str) -> str:
+        try:
+            parsed = SQLParser.parse_delete(sql)
+            table_name = parsed["table"]
+            where_cond = parsed["where"]
+
+            if not self.storage.get_schema(table_name):
+                return f"Error: Table '{table_name}' does not exist"
+            rows = self.storage.get_table_data(table_name)
+            if not rows:
+                return "Delete completed (0 rows affected)"
+
+            if where_cond is None:
+                # Delete all rows
+                self.storage.set_table_data(table_name, [])
+                original_count = len(rows)
+                logger.info(f"Deleted all {original_count} row(s) from '{table_name}'")
+                return f"Delete successful. {original_count} row(s) deleted."
+            else:
+                # Delete rows matching condition
+                new_rows = []
+                deleted_count = 0
+                for row in rows:
+                    if self._evaluate_condition(row, where_cond):
+                        deleted_count += 1
+                    else:
+                        new_rows.append(row)
+                self.storage.set_table_data(table_name, new_rows)
+                logger.info(f"Deleted {deleted_count} row(s) from '{table_name}'")
+                return f"Delete successful. {deleted_count} row(s) affected."
+        except Exception as e:
+            logger.error(f"DELETE failed: {e}")
+            return f"Error: {e}"
+
+    def _drop_table(self, sql: str) -> str:
+        try:
+            table_name = SQLParser.parse_drop_table(sql)
+            if not self.storage.get_schema(table_name):
+                return f"Error: Table '{table_name}' does not exist"
+            # Remove schema and data
+            del self.storage.data["schemas"][table_name]
+            del self.storage.data["tables"][table_name]
+            self.storage.save()
+            logger.info(f"Dropped table '{table_name}'")
+            return f"Table '{table_name}' dropped successfully"
+        except Exception as e:
+            logger.error(f"DROP TABLE failed: {e}")
             return f"Error: {e}"

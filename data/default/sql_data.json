@@ -20,30 +20,6 @@
         "type": "INT",
         "constraints": []
       }
-    ],
-    "sales": [
-      {
-        "name": "id",
-        "type": "INT",
-        "constraints": [
-          "PRIMARY KEY"
-        ]
-      },
-      {
-        "name": "product",
-        "type": "TEXT",
-        "constraints": []
-      },
-      {
-        "name": "amount",
-        "type": "INT",
-        "constraints": []
-      },
-      {
-        "name": "region",
-        "type": "TEXT",
-        "constraints": []
-      }
     ]
   },
   "tables": {
@@ -57,32 +33,6 @@
         "id": 2,
         "name": "Bob",
         "age": null
-      }
-    ],
-    "sales": [
-      {
-        "id": 1,
-        "product": "Laptop",
-        "amount": 1200,
-        "region": "North"
-      },
-      {
-        "id": 2,
-        "product": "Mouse",
-        "amount": 25,
-        "region": "South"
-      },
-      {
-        "id": 3,
-        "product": "Laptop",
-        "amount": 1300,
-        "region": "South"
-      },
-      {
-        "id": 4,
-        "product": "Keyboard",
-        "amount": 45,
-        "region": "North"
       }
     ]
   }
