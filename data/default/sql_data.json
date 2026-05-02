@@ -1,0 +1,39 @@
+{
+  "schemas": {
+    "users": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ]
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "constraints": [
+          "NOT NULL"
+        ]
+      },
+      {
+        "name": "age",
+        "type": "INT",
+        "constraints": []
+      }
+    ]
+  },
+  "tables": {
+    "users": [
+      {
+        "id": 1,
+        "name": "Alice",
+        "age": 30
+      },
+      {
+        "id": 2,
+        "name": "Bob",
+        "age": null
+      }
+    ]
+  }
+}
