@@ -1,0 +1,21 @@
+{
+  "schemas": {
+    "users": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ]
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "constraints": []
+      }
+    ]
+  },
+  "tables": {
+    "users": []
+  }
+}
