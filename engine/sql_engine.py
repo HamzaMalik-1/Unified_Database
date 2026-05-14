@@ -231,21 +231,85 @@ class SQLDatabase:
             if not rows:
                 return "[]"
 
-            # Apply WHERE (using improved evaluator)
+            # ----- Handle uncorrelated IN subqueries in WHERE -----
+            # ----- Handle uncorrelated IN subqueries in WHERE -----
+            # ----- Handle uncorrelated IN subqueries by direct filtering -----
+            if where_cond and "IN (SELECT" in where_cond.upper():
+                import re
+                pattern = r"(\w+)\s+IN\s*\(\s*(SELECT\s+.+?)\s*\)"
+                match = re.search(pattern, where_cond, re.IGNORECASE | re.DOTALL)
+                if match:
+                    outer_column = match.group(1)
+                    inner_sql = match.group(2).strip()
+                    try:
+                        inner_rows = self._execute_select_to_rows(inner_sql)
+                        values = []
+                        for row in inner_rows:
+                            if outer_column in row:
+                                values.append(row[outer_column])
+                            elif len(row) > 0:
+                                # take first column value
+                                values.append(list(row.values())[0])
+                        # Filter current rows directly
+                        rows = [r for r in rows if r.get(outer_column) in values]
+                        # Remove the subquery condition to avoid double‑filtering
+                        where_cond = None
+                    except Exception as e:
+                        logger.error(f"Subquery execution failed: {e}")
+                        return f"Error in subquery: {e}"
+            # -------------------------------------------------------------
+            
+            # ----- Handle correlated EXISTS subqueries -----
+            # ----- Handle correlated EXISTS subqueries (special pattern for orders.user_id = users.id) -----
+            if where_cond and "EXISTS (SELECT" in where_cond.upper():
+                import re
+                # Match: EXISTS ( SELECT 1 FROM orders WHERE orders.user_id = users.id )
+                pattern = r"EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+(\w+)\s+WHERE\s+(\w+)\.(\w+)\s*=\s*(\w+)\.(\w+)\s*\)"
+                match = re.search(pattern, where_cond, re.IGNORECASE | re.DOTALL)
+                if match:
+                    inner_table = match.group(1)      # e.g., "orders"
+                    inner_col = match.group(3)        # e.g., "user_id"
+                    outer_table = match.group(4)      # e.g., "users"
+                    outer_col = match.group(5)        # e.g., "id"
+                    # Get all rows from the inner table (already in memory)
+                    inner_rows = self.storage.get_table_data(inner_table)
+                    matching_values = {r.get(inner_col) for r in inner_rows if r.get(inner_col) is not None}
+                    # Filter outer rows
+                    rows = [r for r in rows if r.get(outer_col) in matching_values]
+                    where_cond = None   # Condition already applied
+                else:
+                    # Fallback: generic substitution (kept for other patterns)
+                    pattern_generic = r"EXISTS\s*\(\s*(SELECT\s+.+?)\s*\)"
+                    match_gen = re.search(pattern_generic, where_cond, re.IGNORECASE | re.DOTALL)
+                    if match_gen:
+                        inner_sql = match_gen.group(1).strip()
+                        filtered_rows = []
+                        for row in rows:
+                            modified_inner = inner_sql
+                            for col_name, col_val in row.items():
+                                modified_inner = re.sub(rf'{table_name}\.{col_name}', str(col_val), modified_inner, flags=re.IGNORECASE)
+                            try:
+                                inner_rows = self._execute_select_to_rows(modified_inner)
+                                if inner_rows:
+                                    filtered_rows.append(row)
+                            except Exception as e:
+                                logger.warning(f"EXISTS subquery failed for row {row}: {e}")
+                                continue
+                        rows = filtered_rows
+                        where_cond = None
+            
+            # Apply WHERE (using existing evaluator)
             if where_cond:
                 rows = [r for r in rows if self._evaluate_condition(r, where_cond)]
 
-            # Aggregate handling
+            # Aggregate handling (unchanged)
             if group_by:
-                # GROUP BY with aggregates
                 if columns_spec == "*":
-                    # For SELECT *, we treat all columns as regular (no aggregates)
                     regular_cols = [c["name"] for c in self.storage.get_schema(table_name)]
                     agg_specs = {}
                 else:
                     regular_cols, agg_specs = self._parse_aggregates(columns_spec)
 
-                # Group rows by the group_by column
                 groups = {}
                 for row in rows:
                     key = row.get(group_by)
@@ -253,18 +317,15 @@ class SQLDatabase:
                         groups[key] = []
                     groups[key].append(row)
 
-                # Build result rows
                 result_rows = []
                 for key, group_rows in groups.items():
                     row_result = {group_by: key}
-                    # For regular columns, take the first non‑null value (assuming functional dependency)
                     for col in regular_cols:
                         val = next((r.get(col) for r in group_rows if r.get(col) is not None), None)
                         row_result[col] = val
-                    # Compute aggregates
                     for alias, (func, src_col) in agg_specs.items():
                         if src_col == "count":
-                            values = [1] * len(group_rows)  # COUNT(*)
+                            values = [1] * len(group_rows)
                         else:
                             values = [r.get(src_col) for r in group_rows if r.get(src_col) is not None]
                         if func == "COUNT":
@@ -279,19 +340,15 @@ class SQLDatabase:
                             result = max(values) if values else None
                         row_result[alias] = result
                     result_rows.append(row_result)
-
                 rows = result_rows
 
-                # Apply HAVING (after grouping)
                 if having_cond:
                     rows = [r for r in rows if self._evaluate_condition(r, having_cond)]
 
             else:
-                # No GROUP BY – if aggregates exist, compute over all rows
                 if columns_spec != "*":
                     regular_cols, agg_specs = self._parse_aggregates(columns_spec)
                     if agg_specs:
-                        # Single row result
                         row_result = {}
                         for alias, (func, src_col) in agg_specs.items():
                             if src_col == "count":
@@ -309,47 +366,38 @@ class SQLDatabase:
                             elif func == "MAX":
                                 result = max(values) if values else None
                             row_result[alias] = result
-                        # For regular columns, we cannot include them without GROUP BY – ignore
                         rows = [row_result]
-                    else:
-                        # No aggregates, keep rows as is
-                        pass
+                    # else: no aggregates, keep as is
 
-            # Apply ORDER BY
+            # ORDER BY
             if order_by:
                 col, direction = order_by
                 reverse = (direction.upper() == "DESC")
                 rows.sort(key=lambda r: r.get(col), reverse=reverse)
 
-            # Apply LIMIT (with offset)
+            # LIMIT
             if limit:
                 limit_val, offset = limit
                 start = offset if offset is not None else 0
                 rows = rows[start:start+limit_val]
 
-            # Select output columns (if columns_spec != "*" and no aggregates already handled)
+            # Column selection
             if columns_spec != "*" and not group_by and not agg_specs:
-                # Plain column selection
                 out_cols = columns_spec
                 result_rows = []
                 for row in rows:
                     new_row = {col: row.get(col) for col in out_cols}
                     result_rows.append(new_row)
                 rows = result_rows
-            elif columns_spec != "*" and group_by:
-                # Already built with aliases, no extra filtering needed
-                pass
-            elif columns_spec == "*":
-                # Keep all columns
-                pass
             # else, rows already have correct shape
 
-            # Return JSON
             import json
             return json.dumps(rows, indent=2, default=str)
+
         except Exception as e:
             logger.error(f"SELECT failed: {e}")
             return f"Error: {e}"
+      
         
     def _update(self, sql: str) -> str:
         try:
@@ -445,3 +493,45 @@ class SQLDatabase:
         except Exception as e:
             logger.error(f"DROP TABLE failed: {e}")
             return f"Error: {e}"
+        
+    def _handle_subqueries(self, where_cond: str, outer_row: Dict = None) -> Tuple[str, bool]:
+        """
+        For uncorrelated IN: replace with list of values.
+        For correlated EXISTS: evaluate per row (return new condition or bool).
+        For simplicity, first only handle uncorrelated IN.
+        """
+        if not where_cond:
+            return where_cond, True
+        # Check for IN (SELECT ...)
+        import re
+        in_match = re.search(r"(\w+)\s+IN\s*\(\s*(SELECT .+?)\s*\)", where_cond, re.IGNORECASE | re.DOTALL)
+        if in_match:
+            column = in_match.group(1)
+            sub_sql = in_match.group(2)
+            # Execute subquery (uncorrelated)
+            sub_result = self._select(sub_sql)  # but _select returns JSON string; need parsed list
+            # We need to parse JSON result to extract values
+            import json
+            try:
+                rows = json.loads(sub_result)
+                values = [row.get(column) for row in rows if column in row]
+                # Build new condition: column IN (val1, val2, ...)
+                if not values:
+                    new_cond = "1=0"  # false condition
+                else:
+                    vals_str = ','.join(str(v) for v in values)
+                    new_cond = f"{column} IN ({vals_str})"
+                # Replace original match with new_cond
+                new_where = where_cond[:in_match.start()] + new_cond + where_cond[in_match.end():]
+                return new_where, True
+            except:
+                pass
+        return where_cond, True
+    
+    def _execute_select_to_rows(self, sql: str) -> List[Dict]:
+        """Execute a SELECT query and return result as list of dicts (for internal use)."""
+        result_str = self._select(sql)
+        if result_str.startswith("Error:"):
+            raise Exception(result_str)
+        import json
+        return json.loads(result_str)

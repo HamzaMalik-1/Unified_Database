@@ -261,3 +261,27 @@ class SQLParser:
         if not match:
             raise ValueError("Invalid DROP TABLE syntax. Expected: DROP TABLE table_name")
         return match.group(1)
+    
+    @staticmethod
+    def extract_subqueries(where_clause: str) -> List[Tuple[str, str]]:
+        """
+        Find all subqueries in a WHERE clause.
+        Returns list of (full_match, subquery_sql) for IN and EXISTS.
+        Example: "id IN (SELECT user_id FROM orders)" 
+        -> [("id IN (SELECT user_id FROM orders)", "SELECT user_id FROM orders")]
+        """
+        if not where_clause:
+            return []
+        subqueries = []
+        # Pattern for IN (SELECT ...)
+        in_pattern = r"(\w+)\s+IN\s*\(\s*(SELECT .+?)\s*\)"
+        for match in re.finditer(in_pattern, where_clause, re.IGNORECASE):
+            column = match.group(1)
+            sub_sql = match.group(2)
+            subqueries.append(("IN", column, sub_sql))
+        # Pattern for EXISTS (SELECT ...)
+        exists_pattern = r"EXISTS\s*\(\s*(SELECT .+?)\s*\)"
+        for match in re.finditer(exists_pattern, where_clause, re.IGNORECASE):
+            sub_sql = match.group(1)
+            subqueries.append(("EXISTS", None, sub_sql))
+        return subqueries
