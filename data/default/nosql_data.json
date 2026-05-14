@@ -1,24 +1,5 @@
 {
   "schemas": {},
   "tables": {},
-  "collections": {
-    "users": [
-      {
-        "id": 1,
-        "name": "Alice",
-        "address": {
-          "city": "Boston",
-          "zip": 123
-        }
-      },
-      {
-        "id": 1,
-        "name": "a",
-        "address": {
-          "city": "Boston",
-          "zip": 34
-        }
-      }
-    ]
-  }
+  "collections": {}
 }

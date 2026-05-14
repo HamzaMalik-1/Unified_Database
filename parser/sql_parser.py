@@ -94,52 +94,191 @@ class SQLParser:
             "values": cleaned_values
         }
 
+   # backend/parser/sql_parser.py – replace parse_select method
+
     @staticmethod
     def parse_select(sql: str) -> Dict[str, Any]:
-        """
-        Parses SELECT statements with support for subqueries in column list.
-        """
         sql = sql.strip()
-        # Find the main FROM keyword (not inside parentheses)
+        # Split into SELECT ... FROM ... and the rest
+        select_part = None
+        from_part = None
+        # Find the position of FROM (not inside parentheses)
         paren_depth = 0
         from_pos = -1
-        sql_upper = sql.upper()
         for i, ch in enumerate(sql):
             if ch == '(':
                 paren_depth += 1
             elif ch == ')':
                 paren_depth -= 1
-            elif paren_depth == 0 and sql_upper[i:i+4] == 'FROM':
+            elif paren_depth == 0 and sql[i:i+4].upper() == 'FROM':
                 from_pos = i
                 break
         if from_pos == -1:
             raise ValueError("SELECT missing FROM clause")
-        
-        # Table name is the word after FROM
-        after_from = sql[from_pos+4:].strip()
-        table_name = after_from.split()[0]  # first word
-        
-        # Columns part is from after SELECT to before FROM
-        columns_part = sql[6:from_pos].strip()  # "SELECT " is 7 chars? Actually "SELECT" length 6, plus space? We'll be safe.
-        # But better: find the start of SELECT keyword
-        select_pos = sql.upper().find('SELECT')
-        if select_pos == -1:
-            raise ValueError("SELECT keyword not found")
-        columns_part = sql[select_pos+6:from_pos].strip()  # skip "SELECT "
-        
-        if columns_part == "*":
+        select_part = sql[6:from_pos].strip()  # after "SELECT "
+        rest = sql[from_pos+4:].strip()        # everything after FROM
+
+        # Parse the FROM clause (can be a single table or joins)
+        # We'll split the rest into table/join parts
+        # Example: "users JOIN orders ON users.id = orders.user_id"
+        # We need to tokenize while respecting parentheses (for subqueries)
+        tokens = []
+        current = []
+        in_paren = 0
+        for ch in rest:
+            if ch == '(':
+                in_paren += 1
+            elif ch == ')':
+                in_paren -= 1
+            elif ch.isspace() and in_paren == 0:
+                if current:
+                    tokens.append(''.join(current))
+                    current = []
+                continue
+            current.append(ch)
+        if current:
+            tokens.append(''.join(current))
+
+        # Now parse tokens: first table, then zero or more JOIN clauses
+        if not tokens:
+            raise ValueError("Invalid FROM clause")
+        main_table = tokens[0]
+        joins = []
+        i = 1
+        while i < len(tokens):
+            token = tokens[i].upper()
+            if token == 'INNER':
+                join_type = 'INNER'
+                i += 1
+                if i >= len(tokens):
+                    raise ValueError("Missing table after INNER JOIN")
+                join_table = tokens[i]
+                i += 1
+                # Look for ON
+                if i >= len(tokens) or tokens[i].upper() != 'ON':
+                    raise ValueError(f"Missing ON clause for JOIN {join_table}")
+                i += 1
+                # ON condition can be multiple tokens until next JOIN or end
+                condition_parts = []
+                while i < len(tokens) and tokens[i].upper() not in ['INNER', 'LEFT', 'RIGHT', 'FULL', 'JOIN']:
+                    condition_parts.append(tokens[i])
+                    i += 1
+                condition = ' '.join(condition_parts)
+                joins.append(('INNER', join_table, condition))
+            elif token == 'LEFT':
+                join_type = 'LEFT'
+                i += 1
+                if i >= len(tokens) or tokens[i].upper() != 'JOIN':
+                    raise ValueError("Expected JOIN after LEFT")
+                i += 1
+                if i >= len(tokens):
+                    raise ValueError("Missing table after LEFT JOIN")
+                join_table = tokens[i]
+                i += 1
+                if i >= len(tokens) or tokens[i].upper() != 'ON':
+                    raise ValueError("Missing ON clause for LEFT JOIN")
+                i += 1
+                condition_parts = []
+                while i < len(tokens) and tokens[i].upper() not in ['INNER', 'LEFT', 'RIGHT', 'FULL', 'JOIN']:
+                    condition_parts.append(tokens[i])
+                    i += 1
+                condition = ' '.join(condition_parts)
+                joins.append(('LEFT', join_table, condition))
+            elif token == 'RIGHT':
+                join_type = 'RIGHT'
+                i += 1
+                if i >= len(tokens) or tokens[i].upper() != 'JOIN':
+                    raise ValueError("Expected JOIN after RIGHT")
+                i += 1
+                if i >= len(tokens):
+                    raise ValueError("Missing table after RIGHT JOIN")
+                join_table = tokens[i]
+                i += 1
+                if i >= len(tokens) or tokens[i].upper() != 'ON':
+                    raise ValueError("Missing ON clause for RIGHT JOIN")
+                i += 1
+                condition_parts = []
+                while i < len(tokens) and tokens[i].upper() not in ['INNER', 'LEFT', 'RIGHT', 'FULL', 'JOIN']:
+                    condition_parts.append(tokens[i])
+                    i += 1
+                condition = ' '.join(condition_parts)
+                joins.append(('RIGHT', join_table, condition))
+            elif token == 'FULL':
+                join_type = 'FULL'
+                i += 1
+                if i >= len(tokens) or tokens[i].upper() != 'JOIN':
+                    raise ValueError("Expected JOIN after FULL")
+                i += 1
+                if i >= len(tokens):
+                    raise ValueError("Missing table after FULL JOIN")
+                join_table = tokens[i]
+                i += 1
+                if i >= len(tokens) or tokens[i].upper() != 'ON':
+                    raise ValueError("Missing ON clause for FULL JOIN")
+                i += 1
+                condition_parts = []
+                while i < len(tokens) and tokens[i].upper() not in ['INNER', 'LEFT', 'RIGHT', 'FULL', 'JOIN']:
+                    condition_parts.append(tokens[i])
+                    i += 1
+                condition = ' '.join(condition_parts)
+                joins.append(('FULL', join_table, condition))
+            elif token == 'NATURAL':
+                # NATURAL JOIN (no ON, join on common columns)
+                i += 1
+                if i >= len(tokens) or tokens[i].upper() != 'JOIN':
+                    raise ValueError("Expected JOIN after NATURAL")
+                i += 1
+                if i >= len(tokens):
+                    raise ValueError("Missing table after NATURAL JOIN")
+                join_table = tokens[i]
+                i += 1
+                # No ON condition
+                joins.append(('NATURAL', join_table, None))
+            elif token == 'CROSS':
+                # CROSS JOIN (cartesian product) – we can treat as INNER with no condition
+                i += 1
+                if i >= len(tokens) or tokens[i].upper() != 'JOIN':
+                    raise ValueError("Expected JOIN after CROSS")
+                i += 1
+                if i >= len(tokens):
+                    raise ValueError("Missing table after CROSS JOIN")
+                join_table = tokens[i]
+                i += 1
+                joins.append(('CROSS', join_table, None))
+            elif token == 'JOIN':
+                # Assume INNER JOIN (if no modifier)
+                join_type = 'INNER'
+                join_table = tokens[i+1] if i+1 < len(tokens) else None
+                if not join_table:
+                    raise ValueError("Missing table after JOIN")
+                i += 2
+                if i >= len(tokens) or tokens[i].upper() != 'ON':
+                    raise ValueError("Missing ON clause for JOIN")
+                i += 1
+                condition_parts = []
+                while i < len(tokens) and tokens[i].upper() not in ['INNER', 'LEFT', 'RIGHT', 'FULL', 'JOIN']:
+                    condition_parts.append(tokens[i])
+                    i += 1
+                condition = ' '.join(condition_parts)
+                joins.append(('INNER', join_table, condition))
+            else:
+                # Probably a comma? Not supported
+                raise ValueError(f"Unexpected token in FROM clause: {token}")
+
+        # Now parse the SELECT clause (columns)
+        if select_part == "*":
             columns = "*"
         else:
-            # Split columns by commas that are not inside parentheses
+            # Split columns by commas not inside parentheses (same as before)
             columns = []
             current = []
-            depth = 0
-            for ch in columns_part:
+            paren_depth = 0
+            for ch in select_part:
                 if ch == '(':
-                    depth += 1
+                    paren_depth += 1
                 elif ch == ')':
-                    depth -= 1
-                elif ch == ',' and depth == 0:
+                    paren_depth -= 1
+                elif ch == ',' and paren_depth == 0:
                     columns.append(''.join(current).strip())
                     current = []
                     continue
@@ -148,23 +287,26 @@ class SQLParser:
                 columns.append(''.join(current).strip())
             columns = [c for c in columns if c]
 
-        # WHERE clause
+        # WHERE clause – extract from remaining part after the FROM clause
+        # The remaining part after the last token (which may contain WHERE, ORDER BY, etc.)
+        # We need to re‑build the original SQL after FROM to parse WHERE, etc.
+        # Easier: use regex on the whole SQL after the FROM position
+        after_from = sql[from_pos+4:].strip()
+        # WHERE
         where_cond = None
-        where_match = re.search(r"\bWHERE\s+(.+?)(?:\s+ORDER\s+BY|\s+GROUP\s+BY|\s+LIMIT|$)", sql, re.IGNORECASE | re.DOTALL)
+        where_match = re.search(r"\bWHERE\s+(.*?)(?:\s+ORDER\s+BY|\s+GROUP\s+BY|\s+LIMIT|$)", after_from, re.IGNORECASE | re.DOTALL)
         if where_match:
             where_cond = where_match.group(1).strip()
-
         # ORDER BY
         order_by = None
-        order_match = re.search(r"\bORDER\s+BY\s+(\w+)\s*(ASC|DESC)?", sql, re.IGNORECASE)
+        order_match = re.search(r"\bORDER\s+BY\s+(\w+)\s*(ASC|DESC)?", after_from, re.IGNORECASE)
         if order_match:
             col = order_match.group(1)
             direction = order_match.group(2).upper() if order_match.group(2) else "ASC"
             order_by = (col, direction)
-
         # LIMIT
         limit = None
-        limit_match = re.search(r"\bLIMIT\s+(\d+)(?:\s*,\s*(\d+))?", sql, re.IGNORECASE)
+        limit_match = re.search(r"\bLIMIT\s+(\d+)(?:\s*,\s*(\d+))?", after_from, re.IGNORECASE)
         if limit_match:
             if limit_match.group(2) is not None:
                 offset = int(limit_match.group(1))
@@ -173,30 +315,28 @@ class SQLParser:
             else:
                 limit_val = int(limit_match.group(1))
                 limit = (limit_val, None)
-
         # GROUP BY
         group_by = None
-        group_match = re.search(r"\bGROUP\s+BY\s+(\w+)", sql, re.IGNORECASE)
+        group_match = re.search(r"\bGROUP\s+BY\s+(\w+)", after_from, re.IGNORECASE)
         if group_match:
             group_by = group_match.group(1)
-
         # HAVING
         having = None
         if group_by:
-            having_match = re.search(r"\bHAVING\s+(.+?)(?:\s+ORDER\s+BY|\s+LIMIT|$)", sql, re.IGNORECASE | re.DOTALL)
+            having_match = re.search(r"\bHAVING\s+(.*?)(?:\s+ORDER\s+BY|\s+LIMIT|$)", after_from, re.IGNORECASE | re.DOTALL)
             if having_match:
                 having = having_match.group(1).strip()
 
         return {
             "columns": columns,
-            "table": table_name,
+            "main_table": main_table,
+            "joins": joins,
             "where": where_cond,
             "order_by": order_by,
             "limit": limit,
             "group_by": group_by,
             "having": having
         }
-        
     @staticmethod
     def parse_update(sql: str) -> Dict[str, Any]:
         """

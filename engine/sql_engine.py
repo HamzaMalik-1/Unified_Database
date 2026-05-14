@@ -218,7 +218,9 @@ class SQLDatabase:
     def _select(self, sql: str) -> str:
         try:
             parsed = SQLParser.parse_select(sql)
-            table_name = parsed["table"]
+            # New join‑aware fields
+            main_table = parsed.get("main_table", parsed.get("table"))  # backward compatibility
+            joins = parsed.get("joins", [])
             where_cond = parsed["where"]
             order_by = parsed["order_by"]
             limit = parsed["limit"]
@@ -226,7 +228,16 @@ class SQLDatabase:
             having_cond = parsed["having"]
             columns_spec = parsed["columns"]
 
-            rows = self.storage.get_table_data(table_name)
+            # ---- Build row set using joins ----
+            rows = self.storage.get_table_data(main_table)
+            if not rows:
+                rows = []
+            for join_type, join_table, condition in joins:
+                right_rows = self.storage.get_table_data(join_table)
+                if not right_rows:
+                    right_rows = []
+                rows = self._join_rows(rows, right_rows, join_type, condition)
+            # If no rows after joins, return empty
             if not rows:
                 return "[]"
 
@@ -237,7 +248,6 @@ class SQLDatabase:
                 for col in columns_spec:
                     col = col.strip()
                     if col.startswith('('):
-                        # Find matching closing parenthesis using depth counting
                         depth = 0
                         end_idx = -1
                         for i, ch in enumerate(col):
@@ -327,7 +337,7 @@ class SQLDatabase:
                         for row in rows:
                             modified_inner = inner_sql
                             for col_name, col_val in row.items():
-                                modified_inner = re.sub(rf'{table_name}\.{col_name}', str(col_val), modified_inner, flags=re.IGNORECASE)
+                                modified_inner = re.sub(rf'{main_table}\.{col_name}', str(col_val), modified_inner, flags=re.IGNORECASE)
                             try:
                                 if self._execute_select_to_rows(modified_inner):
                                     filtered_rows.append(row)
@@ -336,7 +346,7 @@ class SQLDatabase:
                         rows = filtered_rows
                         where_cond = None
 
-            # Apply WHERE
+            # Apply WHERE (using existing evaluator)
             if where_cond:
                 rows = [r for r in rows if self._evaluate_condition(r, where_cond)]
 
@@ -349,9 +359,11 @@ class SQLDatabase:
             # ====================================================
 
             # ----- Aggregate handling (unchanged) -----
+            # For joins, we may need to get schema of main table only; but aggregates work on the joined rows
             if group_by:
                 if columns_spec == "*":
-                    regular_cols = [c["name"] for c in self.storage.get_schema(table_name)]
+                    # For SELECT *, we can't guess regular columns; but we'll keep all columns
+                    regular_cols = []
                     agg_specs = {}
                 else:
                     regular_cols, agg_specs = self._parse_aggregates(columns_spec)
@@ -424,7 +436,7 @@ class SQLDatabase:
                 start = offset if offset is not None else 0
                 rows = rows[start:start+limit_val]
 
-            # Column selection – now using final_columns
+            # Column selection – using final_columns (includes scalar aliases)
             if final_columns != "*" and not group_by and not agg_specs:
                 out_cols = final_columns
                 result_rows = []
@@ -584,3 +596,178 @@ class SQLDatabase:
         row = rows[0]
         # Return the first column value
         return list(row.values())[0] if row else None
+    
+    
+    
+    def _evaluate_join_condition(self, row1: Dict, row2: Dict, condition: str, alias1: str = None, alias2: str = None) -> bool:
+        """Evaluate a join condition like 'users.id = orders.user_id'."""
+        if not condition:
+            return True  # CROSS JOIN or NATURAL (handled separately)
+        import re
+        cond = condition
+        # Replace column references with actual values
+        for col_name, col_val in row1.items():
+            cond = re.sub(rf'\b{col_name}\b', repr(col_val), cond)
+            if alias1:
+                cond = re.sub(rf'\b{alias1}\.{col_name}\b', repr(col_val), cond)
+        for col_name, col_val in row2.items():
+            cond = re.sub(rf'\b{col_name}\b', repr(col_val), cond)
+            if alias2:
+                cond = re.sub(rf'\b{alias2}\.{col_name}\b', repr(col_val), cond)
+        # Convert SQL '=' to '=='
+        cond = re.sub(r'(?<![<>!=])=(?![=])', '==', cond)
+        try:
+            return eval(cond, {"__builtins__": {}})
+        except:
+            return False
+
+    def _join_rows(self, left_rows: List[Dict], right_rows: List[Dict], join_type: str, condition: str, left_alias: str = None, right_alias: str = None) -> List[Dict]:
+        """Perform a join between left and right row sets."""
+        if not left_rows or not right_rows:
+            # Empty side: handle LEFT/RIGHT/FULL accordingly
+            if join_type == 'LEFT':
+                # Keep all left rows, right columns as NULL
+                right_cols = set()
+                if right_rows:
+                    right_cols = right_rows[0].keys()
+                result = []
+                for lr in left_rows:
+                    row = lr.copy()
+                    for col in right_cols:
+                        if col not in row:
+                            row[col] = None
+                    result.append(row)
+                return result
+            elif join_type == 'RIGHT':
+                left_cols = set()
+                if left_rows:
+                    left_cols = left_rows[0].keys()
+                result = []
+                for rr in right_rows:
+                    row = {}
+                    for col in left_cols:
+                        row[col] = None
+                    row.update(rr)
+                    result.append(row)
+                return result
+            elif join_type == 'FULL':
+                # Combine both sides with NULLs
+                left_cols = set()
+                right_cols = set()
+                if left_rows:
+                    left_cols = left_rows[0].keys()
+                if right_rows:
+                    right_cols = right_rows[0].keys()
+                result = []
+                for lr in left_rows:
+                    row = lr.copy()
+                    for col in right_cols:
+                        if col not in row:
+                            row[col] = None
+                    result.append(row)
+                for rr in right_rows:
+                    row = {}
+                    for col in left_cols:
+                        row[col] = None
+                    row.update(rr)
+                    result.append(row)
+                return result
+            else:  # INNER or CROSS -> empty result
+                return []
+
+        # For NATURAL JOIN, find common column names
+        if join_type == 'NATURAL':
+            left_cols = set(left_rows[0].keys())
+            right_cols = set(right_rows[0].keys())
+            common_cols = left_cols.intersection(right_cols)
+            result = []
+            for lr in left_rows:
+                for rr in right_rows:
+                    match = True
+                    for col in common_cols:
+                        if lr.get(col) != rr.get(col):
+                            match = False
+                            break
+                    if match:
+                        combined = {**lr, **rr}
+                        result.append(combined)
+            return result
+
+        # CROSS JOIN (no condition)
+        if join_type == 'CROSS' or not condition:
+            result = []
+            for lr in left_rows:
+                for rr in right_rows:
+                    result.append({**lr, **rr})
+            return result
+
+        # INNER, LEFT, RIGHT, FULL with ON condition
+        matches = []
+        left_matched = [False] * len(left_rows)
+        right_matched = [False] * len(right_rows)
+        for i, lr in enumerate(left_rows):
+            for j, rr in enumerate(right_rows):
+                if self._evaluate_join_condition(lr, rr, condition, left_alias, right_alias):
+                    matches.append((i, j, {**lr, **rr}))
+                    left_matched[i] = True
+                    right_matched[j] = True
+
+        if join_type == 'INNER':
+            return [m[2] for m in matches]
+        elif join_type == 'LEFT':
+            right_cols = set(right_rows[0].keys()) if right_rows else set()
+            result = []
+            for i, lr in enumerate(left_rows):
+                row_matches = [m for m in matches if m[0] == i]
+                if row_matches:
+                    for m in row_matches:
+                        result.append(m[2])
+                else:
+                    row = lr.copy()
+                    for col in right_cols:
+                        if col not in row:
+                            row[col] = None
+                    result.append(row)
+            return result
+        elif join_type == 'RIGHT':
+            left_cols = set(left_rows[0].keys()) if left_rows else set()
+            result = []
+            for j, rr in enumerate(right_rows):
+                row_matches = [m for m in matches if m[1] == j]
+                if row_matches:
+                    for m in row_matches:
+                        result.append(m[2])
+                else:
+                    row = {}
+                    for col in left_cols:
+                        row[col] = None
+                    row.update(rr)
+                    result.append(row)
+            return result
+        elif join_type == 'FULL':
+            left_cols = set(left_rows[0].keys()) if left_rows else set()
+            right_cols = set(right_rows[0].keys()) if right_rows else set()
+            result = []
+            # matched rows
+            result.extend([m[2] for m in matches])
+            # unmatched left
+            left_matched_indices = {m[0] for m in matches}
+            for i, lr in enumerate(left_rows):
+                if i not in left_matched_indices:
+                    row = lr.copy()
+                    for col in right_cols:
+                        if col not in row:
+                            row[col] = None
+                    result.append(row)
+            # unmatched right
+            right_matched_indices = {m[1] for m in matches}
+            for j, rr in enumerate(right_rows):
+                if j not in right_matched_indices:
+                    row = {}
+                    for col in left_cols:
+                        row[col] = None
+                    row.update(rr)
+                    result.append(row)
+            return result
+        else:
+            raise ValueError(f"Unsupported join type: {join_type}")

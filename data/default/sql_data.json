@@ -11,13 +11,23 @@
       {
         "name": "name",
         "type": "TEXT",
-        "constraints": [
-          "NOT NULL"
-        ]
+        "constraints": []
+      }
+    ],
+    "orders": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": []
       },
       {
-        "name": "age",
+        "name": "user_id",
         "type": "INT",
+        "constraints": []
+      },
+      {
+        "name": "product",
+        "type": "TEXT",
         "constraints": []
       }
     ]
@@ -26,18 +36,23 @@
     "users": [
       {
         "id": 1,
-        "name": "Alice",
-        "age": 30
+        "name": "Alice"
       },
       {
         "id": 2,
-        "name": "Bob",
-        "age": null
+        "name": "Bob"
       }
     ],
-    "orders":[
+    "orders": [
       {
-        "user_id":1
+        "id": 1,
+        "user_id": 1,
+        "product": "Laptop"
+      },
+      {
+        "id": 2,
+        "user_id": 1,
+        "product": "Mouse"
       }
     ]
   }
