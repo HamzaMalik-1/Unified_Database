@@ -1,16 +1,13 @@
-# backend/engine/nosql_engine.py
 from storage.storage import Storage
 from parser.nosql_parser import NoSQLParser
 from loguru import logger
 from typing import Dict, Any, List, Tuple
 import json
-from utils.response import ResponseFactory, APIResponse   # ADD THIS
-
+from utils.response import ResponseFactory, APIResponse
 
 class NoSQLDatabase:
     def __init__(self, storage: Storage):
         self.storage = storage
-        # Ensure structure: storage.data["collections"] = dict of collection name -> list of docs
         if 'collections' not in self.storage.data:
             self.storage.data['collections'] = {}
             self.storage.save()

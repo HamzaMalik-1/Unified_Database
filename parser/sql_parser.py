@@ -94,15 +94,11 @@ class SQLParser:
             "values": cleaned_values
         }
 
-   # backend/parser/sql_parser.py – replace parse_select method
-
     @staticmethod
     def parse_select(sql: str) -> Dict[str, Any]:
+        """Parse SELECT with support for joins, subqueries, and cross‑model NOSQL subqueries."""
         sql = sql.strip()
-        # Split into SELECT ... FROM ... and the rest
-        select_part = None
-        from_part = None
-        # Find the position of FROM (not inside parentheses)
+        # Find the position of the main FROM keyword (not inside parentheses)
         paren_depth = 0
         from_pos = -1
         for i, ch in enumerate(sql):
@@ -115,17 +111,36 @@ class SQLParser:
                 break
         if from_pos == -1:
             raise ValueError("SELECT missing FROM clause")
-        select_part = sql[6:from_pos].strip()  # after "SELECT "
-        rest = sql[from_pos+4:].strip()        # everything after FROM
+        select_part = sql[6:from_pos].strip()        # after "SELECT "
+        after_from = sql[from_pos+4:].strip()        # everything after FROM
 
-        # Parse the FROM clause (can be a single table or joins)
-        # We'll split the rest into table/join parts
-        # Example: "users JOIN orders ON users.id = orders.user_id"
-        # We need to tokenize while respecting parentheses (for subqueries)
+        # --- Find where the FROM clause ends (before WHERE, ORDER, GROUP, LIMIT, HAVING) ---
+        # Scan until we hit one of these keywords (not inside parentheses)
+        clause_keywords = ['WHERE', 'ORDER BY', 'GROUP BY', 'LIMIT', 'HAVING']
+        clause_positions = {}
+        for kw in clause_keywords:
+            depth = 0
+            kw_len = len(kw)
+            for j, ch in enumerate(after_from):
+                if ch == '(':
+                    depth += 1
+                elif ch == ')':
+                    depth -= 1
+                elif depth == 0 and after_from[j:j+kw_len].upper() == kw:
+                    clause_positions[kw] = j
+                    break
+        # Earliest clause start
+        from_end = len(after_from)
+        if clause_positions:
+            from_end = min(clause_positions.values())
+        from_clause = after_from[:from_end].strip()
+        rest = after_from[from_end:].strip() if from_end < len(after_from) else ""
+
+        # --- Tokenize the FROM clause (respect parentheses for subqueries) ---
         tokens = []
         current = []
         in_paren = 0
-        for ch in rest:
+        for ch in from_clause:
             if ch == '(':
                 in_paren += 1
             elif ch == ')':
@@ -139,7 +154,6 @@ class SQLParser:
         if current:
             tokens.append(''.join(current))
 
-        # Now parse tokens: first table, then zero or more JOIN clauses
         if not tokens:
             raise ValueError("Invalid FROM clause")
         main_table = tokens[0]
@@ -154,11 +168,9 @@ class SQLParser:
                     raise ValueError("Missing table after INNER JOIN")
                 join_table = tokens[i]
                 i += 1
-                # Look for ON
                 if i >= len(tokens) or tokens[i].upper() != 'ON':
                     raise ValueError(f"Missing ON clause for JOIN {join_table}")
                 i += 1
-                # ON condition can be multiple tokens until next JOIN or end
                 condition_parts = []
                 while i < len(tokens) and tokens[i].upper() not in ['INNER', 'LEFT', 'RIGHT', 'FULL', 'JOIN']:
                     condition_parts.append(tokens[i])
@@ -223,7 +235,6 @@ class SQLParser:
                 condition = ' '.join(condition_parts)
                 joins.append(('FULL', join_table, condition))
             elif token == 'NATURAL':
-                # NATURAL JOIN (no ON, join on common columns)
                 i += 1
                 if i >= len(tokens) or tokens[i].upper() != 'JOIN':
                     raise ValueError("Expected JOIN after NATURAL")
@@ -232,10 +243,8 @@ class SQLParser:
                     raise ValueError("Missing table after NATURAL JOIN")
                 join_table = tokens[i]
                 i += 1
-                # No ON condition
                 joins.append(('NATURAL', join_table, None))
             elif token == 'CROSS':
-                # CROSS JOIN (cartesian product) – we can treat as INNER with no condition
                 i += 1
                 if i >= len(tokens) or tokens[i].upper() != 'JOIN':
                     raise ValueError("Expected JOIN after CROSS")
@@ -246,7 +255,6 @@ class SQLParser:
                 i += 1
                 joins.append(('CROSS', join_table, None))
             elif token == 'JOIN':
-                # Assume INNER JOIN (if no modifier)
                 join_type = 'INNER'
                 join_table = tokens[i+1] if i+1 < len(tokens) else None
                 if not join_table:
@@ -262,14 +270,14 @@ class SQLParser:
                 condition = ' '.join(condition_parts)
                 joins.append(('INNER', join_table, condition))
             else:
-                # Probably a comma? Not supported
+                # If we encounter something unexpected, it might be part of a subquery inside the FROM clause?
+                # But for cross-model subqueries, the WHERE clause is isolated above.
                 raise ValueError(f"Unexpected token in FROM clause: {token}")
 
-        # Now parse the SELECT clause (columns)
+        # --- Parse SELECT columns ---
         if select_part == "*":
             columns = "*"
         else:
-            # Split columns by commas not inside parentheses (same as before)
             columns = []
             current = []
             paren_depth = 0
@@ -287,26 +295,25 @@ class SQLParser:
                 columns.append(''.join(current).strip())
             columns = [c for c in columns if c]
 
-        # WHERE clause – extract from remaining part after the FROM clause
-        # The remaining part after the last token (which may contain WHERE, ORDER BY, etc.)
-        # We need to re‑build the original SQL after FROM to parse WHERE, etc.
-        # Easier: use regex on the whole SQL after the FROM position
-        after_from = sql[from_pos+4:].strip()
-        # WHERE
+        # --- Parse WHERE, ORDER BY, LIMIT, GROUP BY, HAVING from the remaining part (rest) ---
         where_cond = None
-        where_match = re.search(r"\bWHERE\s+(.*?)(?:\s+ORDER\s+BY|\s+GROUP\s+BY|\s+LIMIT|$)", after_from, re.IGNORECASE | re.DOTALL)
+        order_by = None
+        limit = None
+        group_by = None
+        having = None
+
+        # WHERE
+        where_match = re.search(r"\bWHERE\s+(.*?)(?:\s+ORDER\s+BY|\s+GROUP\s+BY|\s+LIMIT|$)", rest, re.IGNORECASE | re.DOTALL)
         if where_match:
             where_cond = where_match.group(1).strip()
         # ORDER BY
-        order_by = None
-        order_match = re.search(r"\bORDER\s+BY\s+(\w+)\s*(ASC|DESC)?", after_from, re.IGNORECASE)
+        order_match = re.search(r"\bORDER\s+BY\s+(\w+)\s*(ASC|DESC)?", rest, re.IGNORECASE)
         if order_match:
             col = order_match.group(1)
             direction = order_match.group(2).upper() if order_match.group(2) else "ASC"
             order_by = (col, direction)
         # LIMIT
-        limit = None
-        limit_match = re.search(r"\bLIMIT\s+(\d+)(?:\s*,\s*(\d+))?", after_from, re.IGNORECASE)
+        limit_match = re.search(r"\bLIMIT\s+(\d+)(?:\s*,\s*(\d+))?", rest, re.IGNORECASE)
         if limit_match:
             if limit_match.group(2) is not None:
                 offset = int(limit_match.group(1))
@@ -316,14 +323,12 @@ class SQLParser:
                 limit_val = int(limit_match.group(1))
                 limit = (limit_val, None)
         # GROUP BY
-        group_by = None
-        group_match = re.search(r"\bGROUP\s+BY\s+(\w+)", after_from, re.IGNORECASE)
+        group_match = re.search(r"\bGROUP\s+BY\s+(\w+)", rest, re.IGNORECASE)
         if group_match:
             group_by = group_match.group(1)
         # HAVING
-        having = None
         if group_by:
-            having_match = re.search(r"\bHAVING\s+(.*?)(?:\s+ORDER\s+BY|\s+LIMIT|$)", after_from, re.IGNORECASE | re.DOTALL)
+            having_match = re.search(r"\bHAVING\s+(.*?)(?:\s+ORDER\s+BY|\s+LIMIT|$)", rest, re.IGNORECASE | re.DOTALL)
             if having_match:
                 having = having_match.group(1).strip()
 
@@ -337,6 +342,7 @@ class SQLParser:
             "group_by": group_by,
             "having": having
         }
+
     @staticmethod
     def parse_update(sql: str) -> Dict[str, Any]:
         """

@@ -1,4 +1,3 @@
-# backend/catalog/database_catalog.py
 import os
 from storage.storage import Storage
 from engine.sql_engine import SQLDatabase
@@ -19,13 +18,16 @@ class DatabaseCatalog:
     def create_database(self, name: str) -> str:
         if name in self._databases:
             return f"Database '{name}' already exists"
-        # Create folder for this database
         os.makedirs(f"data/{name}", exist_ok=True)
         sql_storage = Storage(f"data/{name}/sql_data.json")
         nosql_storage = Storage(f"data/{name}/nosql_data.json")
+        sql_engine = SQLDatabase(sql_storage)
+        nosql_engine = NoSQLDatabase(nosql_storage)
+        # Link the NoSQL engine to the SQL engine (for cross‑model subqueries)
+        sql_engine.set_nosql_engine(nosql_engine)
         self._databases[name] = {
-            "sql": SQLDatabase(sql_storage),
-            "nosql": NoSQLDatabase(nosql_storage)
+            "sql": sql_engine,
+            "nosql": nosql_engine
         }
         return f"Database '{name}' created"
 

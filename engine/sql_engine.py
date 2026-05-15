@@ -7,13 +7,17 @@ from loguru import logger
 from typing import Dict, List, Tuple, Any
 import re
 import json
-from utils.response import ResponseFactory, APIResponse   # <-- ADD THIS
+from utils.response import ResponseFactory, APIResponse
 
 class SQLDatabase:
     def __init__(self, storage: Storage):
         self.storage = storage
+        self.nosql_engine = None          # <-- ADDED
 
-    def execute(self, command: str) -> APIResponse:   # <-- RETURN TYPE CHANGED
+    def set_nosql_engine(self, nosql_engine):   # <-- ADDED
+        self.nosql_engine = nosql_engine
+
+    def execute(self, command: str) -> APIResponse:
         cmd_upper = command.strip().upper()
         try:
             if cmd_upper.startswith("CREATE TABLE"):
@@ -30,7 +34,6 @@ class SQLDatabase:
                 result_str = self._select(command)
                 if result_str.startswith("Error:"):
                     return ResponseFactory.error(result_str, status=400)
-                # Parse JSON result
                 try:
                     rows = json.loads(result_str)
                     if isinstance(rows, list) and rows and all(isinstance(r, dict) for r in rows):
@@ -79,73 +82,49 @@ class SQLDatabase:
         try:
             parsed = SQLParser.parse_insert(sql)
             table_name = parsed["table_name"]
-            specified_cols = parsed["columns"]  # list of column names (may be empty)
-            raw_values = parsed["values"]       # list of values (already typed: int, float, str, None)
-
-            # Get schema
+            specified_cols = parsed["columns"]
+            raw_values = parsed["values"]
             schema = self.storage.get_schema(table_name)
             if not schema:
                 return f"Error: Table '{table_name}' does not exist"
             existing_rows = self.storage.get_table_data(table_name)
-
-            # Determine target columns and values
             if not specified_cols:
-                # Use all columns in schema order
                 target_cols = [col["name"] for col in schema]
                 if len(raw_values) != len(target_cols):
                     return f"Error: Expected {len(target_cols)} values for all columns, got {len(raw_values)}"
-                # Build a dict of column->value
                 value_dict = dict(zip(target_cols, raw_values))
             else:
-                # Specific columns provided
-                # Check that all specified columns exist in schema
                 schema_col_names = [col["name"] for col in schema]
                 for col in specified_cols:
                     if col not in schema_col_names:
                         return f"Error: Column '{col}' does not exist in table '{table_name}'"
                 if len(specified_cols) != len(raw_values):
                     return f"Error: Number of columns ({len(specified_cols)}) does not match number of values ({len(raw_values)})"
-                # Build value dict for specified columns
                 value_dict = dict(zip(specified_cols, raw_values))
-                # For unspecified columns, we will set None (or raise if NOT NULL)
                 target_cols = specified_cols
-
-            # Prepare full row (ordered by schema columns)
             row = {}
             for col_def in schema:
                 col_name = col_def["name"]
                 col_type = col_def["type"]
                 constraints = col_def["constraints"]
-
-                # Get value for this column (may be None if not provided)
                 val = value_dict.get(col_name, None)
-
-                # Validate data type
                 try:
                     typed_val = DataType.validate(val, col_type) if val is not None else None
                 except ValueError as e:
                     return f"Error in column '{col_name}': {e}"
-
-                # Check constraints
-                # NOT NULL
                 if "NOT NULL" in constraints and typed_val is None:
                     return f"Error: Column '{col_name}' cannot be NULL"
-                # PRIMARY KEY (implies NOT NULL + UNIQUE)
                 if "PRIMARY KEY" in constraints:
                     try:
                         SQLConstraint.check_primary_key(typed_val, col_name, existing_rows, len(existing_rows))
                     except ValueError as e:
                         return f"Error: {e}"
-                # UNIQUE (if not already covered by PRIMARY KEY)
                 if "UNIQUE" in constraints and "PRIMARY KEY" not in constraints:
                     try:
                         SQLConstraint.check_unique(typed_val, col_name, existing_rows, len(existing_rows))
                     except ValueError as e:
                         return f"Error: {e}"
-
                 row[col_name] = typed_val
-
-            # Append row
             existing_rows.append(row)
             self.storage.set_table_data(table_name, existing_rows)
             logger.info(f"Inserted row into '{table_name}': {row}")
@@ -153,15 +132,11 @@ class SQLDatabase:
         except Exception as e:
             logger.error(f"INSERT failed: {e}")
             return f"Error: {e}"
-    
-    # engine/sql_engine.py – inside SQLDatabase class
 
     def _evaluate_condition(self, row: Dict, condition_str: str) -> bool:
-        """Evaluate WHERE/HAVING condition by converting SQL operators to Python."""
         if not condition_str:
             return True
         cond = condition_str.strip()
-        # Convert SQL '=' to Python '==', but avoid changing '!=', '<=', '>=', '=='
         cond = re.sub(r'(?<![<>!=])=(?![=])', '==', cond)
         try:
             result = eval(cond, {"__builtins__": {}}, row)
@@ -171,12 +146,6 @@ class SQLDatabase:
             return False
 
     def _apply_aggregates(self, rows: List[Dict], group_col: str, agg_specs: Dict[str, str]) -> List[Dict]:
-        """
-        Simple grouping: group by group_col, compute aggregates for other columns.
-        agg_specs: {"column": "function"} e.g., {"sales": "SUM", "count": "COUNT"}
-        Returns list of dicts with group key and aggregate results.
-        For now, we only support GROUP BY single column.
-        """
         groups = {}
         for row in rows:
             key = row.get(group_col)
@@ -201,20 +170,10 @@ class SQLDatabase:
             result.append(group_result)
         return result
 
-    # engine/sql_engine.py – inside SQLDatabase class
-
     def _parse_aggregates(self, columns: List[str]) -> Tuple[List[str], Dict[str, Tuple[str, str]]]:
-        """
-        Parse column list, detect aggregate functions with optional alias.
-        Returns:
-            regular_columns: list of plain column names
-            aggregates: dict {output_alias: (function, source_column)}
-        Example: "SUM(amount) AS total" -> aggregates["total"] = ("SUM", "amount")
-        """
         import re
         regular = []
         aggregates = {}
-        # Patterns for aggregate functions (case‑insensitive)
         agg_patterns = {
             "COUNT": r"COUNT\(\s*(?:\*|\w+)\s*\)",
             "SUM": r"SUM\(\s*(\w+)\s*\)",
@@ -223,34 +182,27 @@ class SQLDatabase:
             "MAX": r"MAX\(\s*(\w+)\s*\)"
         }
         for col in columns:
-            col_upper = col.upper()
             matched = False
             for func, pattern in agg_patterns.items():
                 match = re.match(pattern, col, re.IGNORECASE)
                 if match:
-                    # Extract inner column (except COUNT)
                     if func == "COUNT":
-                        inner = "count"  # placeholder
+                        inner = "count"
                     else:
                         inner = match.group(1)
-                    # Check for alias: "AS alias"
                     alias_match = re.search(r"\s+AS\s+(\w+)", col, re.IGNORECASE)
-                    if alias_match:
-                        alias = alias_match.group(1)
-                    else:
-                        alias = f"{func}({inner})"
+                    alias = alias_match.group(1) if alias_match else f"{func}({inner})"
                     aggregates[alias] = (func, inner)
                     matched = True
                     break
             if not matched:
                 regular.append(col)
         return regular, aggregates
-    
+
     def _select(self, sql: str) -> str:
         try:
             parsed = SQLParser.parse_select(sql)
-            # New join‑aware fields
-            main_table = parsed.get("main_table", parsed.get("table"))  # backward compatibility
+            main_table = parsed.get("main_table", parsed.get("table"))
             joins = parsed.get("joins", [])
             where_cond = parsed["where"]
             order_by = parsed["order_by"]
@@ -259,7 +211,6 @@ class SQLDatabase:
             having_cond = parsed["having"]
             columns_spec = parsed["columns"]
 
-            # ---- Build row set using joins ----
             rows = self.storage.get_table_data(main_table)
             if not rows:
                 rows = []
@@ -268,11 +219,32 @@ class SQLDatabase:
                 if not right_rows:
                     right_rows = []
                 rows = self._join_rows(rows, right_rows, join_type, condition)
-            # If no rows after joins, return empty
             if not rows:
                 return "[]"
 
-            # ========== Handle scalar subqueries in SELECT list ==========
+            # ---------- Cross‑model IN subqueries (SQL with NoSQL) ----------
+            if where_cond and "NOSQL SELECT" in where_cond.upper() and self.nosql_engine:
+                import re
+                pattern = r"(\w+)\s+IN\s*\(\s*NOSQL\s+(SELECT.+?)\s*\)"
+                match = re.search(pattern, where_cond, re.IGNORECASE | re.DOTALL)
+                if match:
+                    outer_column = match.group(1)
+                    inner_nosql_sql = match.group(2).strip()
+                    # The inner_nosql_sql already contains the SELECT command without the NOSQL prefix
+                    resp = self.nosql_engine.execute(inner_nosql_sql)
+                    if not resp.success:
+                        return f"Error in cross-model subquery: {resp.message}"
+                    values = []
+                    if resp.data.type == "table":
+                        values = [row.get(list(row.keys())[0]) for row in resp.data.content if row]
+                    elif resp.data.type == "json":
+                        if isinstance(resp.data.content, list):
+                            values = [list(item.values())[0] for item in resp.data.content if item]
+                    rows = [r for r in rows if r.get(outer_column) in values]
+                    where_cond = None
+            # -----------------------------------------------------------------
+
+            # ----- scalar subquery extraction -----
             scalar_subqueries = []
             final_columns = []
             if columns_spec != "*":
@@ -308,9 +280,8 @@ class SQLDatabase:
                         final_columns.append(col)
             else:
                 final_columns = "*"
-            # =================================================================
 
-            # ========== Multi‑column IN subqueries ==========
+            # ----- multi‑column IN -----
             if where_cond and re.search(r"\(\s*[\w.]+\s*,\s*[\w.]+\s*\)\s+IN\s*\(", where_cond, re.IGNORECASE):
                 pattern = r"\(\s*([\w.,\s]+)\s*\)\s+IN\s*\(\s*(SELECT.+?)\s*\)"
                 match = re.search(pattern, where_cond, re.IGNORECASE | re.DOTALL)
@@ -322,9 +293,8 @@ class SQLDatabase:
                     value_tuples = [tuple(r.values()) for r in sub_rows]
                     rows = [r for r in rows if tuple(r.get(c) for c in outer_cols) in value_tuples]
                     where_cond = None
-            # =================================================================
 
-            # ----- Uncorrelated IN subqueries -----
+            # ----- uncorrelated IN -----
             if where_cond and "IN (SELECT" in where_cond.upper():
                 pattern = r"(\w+)\s+IN\s*\(\s*(SELECT\s+.+?)\s*\)"
                 match = re.search(pattern, where_cond, re.IGNORECASE | re.DOTALL)
@@ -344,9 +314,8 @@ class SQLDatabase:
                     except Exception as e:
                         logger.error(f"Subquery execution failed: {e}")
                         return f"Error in subquery: {e}"
-            # -------------------------------------------------------------
 
-            # ----- Correlated EXISTS subqueries -----
+            # ----- correlated EXISTS -----
             if where_cond and "EXISTS (SELECT" in where_cond.upper():
                 pattern = r"EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+(\w+)\s+WHERE\s+(\w+)\.(\w+)\s*=\s*(\w+)\.(\w+)\s*\)"
                 match = re.search(pattern, where_cond, re.IGNORECASE | re.DOTALL)
@@ -377,35 +346,30 @@ class SQLDatabase:
                         rows = filtered_rows
                         where_cond = None
 
-            # Apply WHERE (using existing evaluator)
+            # Apply WHERE
             if where_cond:
                 rows = [r for r in rows if self._evaluate_condition(r, where_cond)]
 
-            # ========== Attach scalar subquery results ==========
+            # Attach scalar subquery values
             if scalar_subqueries:
                 for alias, sub_sql in scalar_subqueries:
                     scalar_val = self._evaluate_scalar_subquery(sub_sql)
                     for row in rows:
                         row[alias] = scalar_val
-            # ====================================================
 
-            # ----- Aggregate handling (unchanged) -----
-            # For joins, we may need to get schema of main table only; but aggregates work on the joined rows
+            # GROUP BY / aggregates
             if group_by:
                 if columns_spec == "*":
-                    # For SELECT *, we can't guess regular columns; but we'll keep all columns
                     regular_cols = []
                     agg_specs = {}
                 else:
                     regular_cols, agg_specs = self._parse_aggregates(columns_spec)
-
                 groups = {}
                 for row in rows:
                     key = row.get(group_by)
                     if key not in groups:
                         groups[key] = []
                     groups[key].append(row)
-
                 result_rows = []
                 for key, group_rows in groups.items():
                     row_result = {group_by: key}
@@ -467,7 +431,7 @@ class SQLDatabase:
                 start = offset if offset is not None else 0
                 rows = rows[start:start+limit_val]
 
-            # Column selection – using final_columns (includes scalar aliases)
+            # Column selection (final)
             if final_columns != "*" and not group_by and not agg_specs:
                 out_cols = final_columns
                 result_rows = []
@@ -476,13 +440,12 @@ class SQLDatabase:
                     result_rows.append(new_row)
                 rows = result_rows
 
-            import json
             return json.dumps(rows, indent=2, default=str)
 
         except Exception as e:
             logger.error(f"SELECT failed: {e}")
             return f"Error: {e}"
-       
+
     def _update(self, sql: str) -> str:
         try:
             parsed = SQLParser.parse_update(sql)
@@ -534,21 +497,17 @@ class SQLDatabase:
             parsed = SQLParser.parse_delete(sql)
             table_name = parsed["table"]
             where_cond = parsed["where"]
-
             if not self.storage.get_schema(table_name):
                 return f"Error: Table '{table_name}' does not exist"
             rows = self.storage.get_table_data(table_name)
             if not rows:
                 return "Delete completed (0 rows affected)"
-
             if where_cond is None:
-                # Delete all rows
                 self.storage.set_table_data(table_name, [])
                 original_count = len(rows)
                 logger.info(f"Deleted all {original_count} row(s) from '{table_name}'")
                 return f"Delete successful. {original_count} row(s) deleted."
             else:
-                # Delete rows matching condition
                 new_rows = []
                 deleted_count = 0
                 for row in rows:
@@ -568,7 +527,6 @@ class SQLDatabase:
             table_name = SQLParser.parse_drop_table(sql)
             if not self.storage.get_schema(table_name):
                 return f"Error: Table '{table_name}' does not exist"
-            # Remove schema and data
             del self.storage.data["schemas"][table_name]
             del self.storage.data["tables"][table_name]
             self.storage.save()
@@ -577,66 +535,49 @@ class SQLDatabase:
         except Exception as e:
             logger.error(f"DROP TABLE failed: {e}")
             return f"Error: {e}"
-        
+
     def _handle_subqueries(self, where_cond: str, outer_row: Dict = None) -> Tuple[str, bool]:
-        """
-        For uncorrelated IN: replace with list of values.
-        For correlated EXISTS: evaluate per row (return new condition or bool).
-        For simplicity, first only handle uncorrelated IN.
-        """
         if not where_cond:
             return where_cond, True
-        # Check for IN (SELECT ...)
         import re
         in_match = re.search(r"(\w+)\s+IN\s*\(\s*(SELECT .+?)\s*\)", where_cond, re.IGNORECASE | re.DOTALL)
         if in_match:
             column = in_match.group(1)
             sub_sql = in_match.group(2)
-            # Execute subquery (uncorrelated)
-            sub_result = self._select(sub_sql)  # but _select returns JSON string; need parsed list
-            # We need to parse JSON result to extract values
+            sub_result = self._select(sub_sql)
             import json
             try:
                 rows = json.loads(sub_result)
                 values = [row.get(column) for row in rows if column in row]
-                # Build new condition: column IN (val1, val2, ...)
                 if not values:
-                    new_cond = "1=0"  # false condition
+                    new_cond = "1=0"
                 else:
                     vals_str = ','.join(str(v) for v in values)
                     new_cond = f"{column} IN ({vals_str})"
-                # Replace original match with new_cond
                 new_where = where_cond[:in_match.start()] + new_cond + where_cond[in_match.end():]
                 return new_where, True
             except:
                 pass
         return where_cond, True
-    
+
     def _execute_select_to_rows(self, sql: str) -> List[Dict]:
-        """Execute a SELECT query and return result as list of dicts (for internal use)."""
         result_str = self._select(sql)
         if result_str.startswith("Error:"):
             raise Exception(result_str)
         return json.loads(result_str)
-    
+
     def _evaluate_scalar_subquery(self, subquery_sql: str) -> Any:
-        """Execute a scalar subquery (returns one row, one column)."""
         rows = self._execute_select_to_rows(subquery_sql)
         if not rows:
             return None
         row = rows[0]
-        # Return the first column value
         return list(row.values())[0] if row else None
-    
-    
-    
+
     def _evaluate_join_condition(self, row1: Dict, row2: Dict, condition: str, alias1: str = None, alias2: str = None) -> bool:
-        """Evaluate a join condition like 'users.id = orders.user_id'."""
         if not condition:
-            return True  # CROSS JOIN or NATURAL (handled separately)
+            return True
         import re
         cond = condition
-        # Replace column references with actual values
         for col_name, col_val in row1.items():
             cond = re.sub(rf'\b{col_name}\b', repr(col_val), cond)
             if alias1:
@@ -645,7 +586,6 @@ class SQLDatabase:
             cond = re.sub(rf'\b{col_name}\b', repr(col_val), cond)
             if alias2:
                 cond = re.sub(rf'\b{alias2}\.{col_name}\b', repr(col_val), cond)
-        # Convert SQL '=' to '=='
         cond = re.sub(r'(?<![<>!=])=(?![=])', '==', cond)
         try:
             return eval(cond, {"__builtins__": {}})
@@ -653,11 +593,8 @@ class SQLDatabase:
             return False
 
     def _join_rows(self, left_rows: List[Dict], right_rows: List[Dict], join_type: str, condition: str, left_alias: str = None, right_alias: str = None) -> List[Dict]:
-        """Perform a join between left and right row sets."""
         if not left_rows or not right_rows:
-            # Empty side: handle LEFT/RIGHT/FULL accordingly
             if join_type == 'LEFT':
-                # Keep all left rows, right columns as NULL
                 right_cols = set()
                 if right_rows:
                     right_cols = right_rows[0].keys()
@@ -682,7 +619,6 @@ class SQLDatabase:
                     result.append(row)
                 return result
             elif join_type == 'FULL':
-                # Combine both sides with NULLs
                 left_cols = set()
                 right_cols = set()
                 if left_rows:
@@ -703,10 +639,8 @@ class SQLDatabase:
                     row.update(rr)
                     result.append(row)
                 return result
-            else:  # INNER or CROSS -> empty result
+            else:
                 return []
-
-        # For NATURAL JOIN, find common column names
         if join_type == 'NATURAL':
             left_cols = set(left_rows[0].keys())
             right_cols = set(right_rows[0].keys())
@@ -723,16 +657,12 @@ class SQLDatabase:
                         combined = {**lr, **rr}
                         result.append(combined)
             return result
-
-        # CROSS JOIN (no condition)
         if join_type == 'CROSS' or not condition:
             result = []
             for lr in left_rows:
                 for rr in right_rows:
                     result.append({**lr, **rr})
             return result
-
-        # INNER, LEFT, RIGHT, FULL with ON condition
         matches = []
         left_matched = [False] * len(left_rows)
         right_matched = [False] * len(right_rows)
@@ -742,7 +672,6 @@ class SQLDatabase:
                     matches.append((i, j, {**lr, **rr}))
                     left_matched[i] = True
                     right_matched[j] = True
-
         if join_type == 'INNER':
             return [m[2] for m in matches]
         elif join_type == 'LEFT':
@@ -779,9 +708,7 @@ class SQLDatabase:
             left_cols = set(left_rows[0].keys()) if left_rows else set()
             right_cols = set(right_rows[0].keys()) if right_rows else set()
             result = []
-            # matched rows
             result.extend([m[2] for m in matches])
-            # unmatched left
             left_matched_indices = {m[0] for m in matches}
             for i, lr in enumerate(left_rows):
                 if i not in left_matched_indices:
@@ -790,7 +717,6 @@ class SQLDatabase:
                         if col not in row:
                             row[col] = None
                     result.append(row)
-            # unmatched right
             right_matched_indices = {m[1] for m in matches}
             for j, rr in enumerate(right_rows):
                 if j not in right_matched_indices:
