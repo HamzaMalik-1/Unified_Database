@@ -2,8 +2,9 @@
 from storage.storage import Storage
 from parser.nosql_parser import NoSQLParser
 from loguru import logger
-from typing import Dict, Any, List,Tuple
+from typing import Dict, Any, List, Tuple
 import json
+from utils.response import ResponseFactory, APIResponse   # ADD THIS
 
 
 class NoSQLDatabase:
@@ -14,24 +15,54 @@ class NoSQLDatabase:
             self.storage.data['collections'] = {}
             self.storage.save()
 
-    def execute(self, command: str) -> str:
+    def execute(self, command: str) -> APIResponse:
         cmd_upper = command.strip().upper()
-        if cmd_upper.startswith("CREATE COLLECTION"):
-            return self._create_collection(command)
-        elif cmd_upper.startswith("INSERT INTO"):
-            return self._insert(command)
-        elif cmd_upper.startswith("SELECT "):
-            return self._select(command)  
-        elif cmd_upper.startswith("UPDATE "):
-            # Check if it's UPDATE (without IN) – we need to distinguish from UPDATE IN (old)
-            # We'll call a unified method
-            return self._update(command)
-        elif cmd_upper.startswith("DROP COLLECTION"):
-            return self._drop_collection(command)
-        elif cmd_upper.startswith("DELETE FROM"):
-            return self._delete(command)
-        else:
-            return f"Unsupported NoSQL command: {command}"
+        try:
+            if cmd_upper.startswith("CREATE COLLECTION"):
+                result = self._create_collection(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
+            elif cmd_upper.startswith("INSERT INTO"):
+                result = self._insert(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
+            elif cmd_upper.startswith("SELECT "):
+                result_str = self._select(command)
+                if result_str.startswith("Error:"):
+                    return ResponseFactory.error(result_str, status=400)
+                try:
+                    data = json.loads(result_str)
+                    if isinstance(data, list):
+                        if data and all(isinstance(item, dict) for item in data):
+                            return ResponseFactory.table(data, message="Query executed successfully")
+                        else:
+                            return ResponseFactory.json(data, message="Query executed successfully")
+                    else:
+                        return ResponseFactory.json(data, message="Query executed successfully")
+                except Exception:
+                    return ResponseFactory.text(result_str, message="Query executed successfully")
+            elif cmd_upper.startswith("UPDATE "):
+                result = self._update(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
+            elif cmd_upper.startswith("DROP COLLECTION"):
+                result = self._drop_collection(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
+            elif cmd_upper.startswith("DELETE FROM"):
+                result = self._delete(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
+            else:
+                return ResponseFactory.error(f"Unsupported NoSQL command: {command}", status=400)
+        except Exception as e:
+            logger.error(f"NoSQL execution failed: {e}")
+            return ResponseFactory.error(str(e), status=500)
 
     def _create_collection(self, sql: str) -> str:
         try:

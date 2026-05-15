@@ -4,30 +4,61 @@ from data_types.data_types import DataType
 from constraints.sql_constraints import SQLConstraint
 from parser.sql_parser import SQLParser
 from loguru import logger
-from typing import Dict,List,Tuple,Any
+from typing import Dict, List, Tuple, Any
 import re
 import json
+from utils.response import ResponseFactory, APIResponse   # <-- ADD THIS
 
 class SQLDatabase:
     def __init__(self, storage: Storage):
         self.storage = storage
 
-    def execute(self, command: str) -> str:
+    def execute(self, command: str) -> APIResponse:   # <-- RETURN TYPE CHANGED
         cmd_upper = command.strip().upper()
-        if cmd_upper.startswith("CREATE TABLE"):
-            return self._create_table(command)
-        elif cmd_upper.startswith("INSERT INTO"):
-            return self._insert(command)
-        elif cmd_upper.startswith("SELECT"):
-            return self._select(command)  
-        elif cmd_upper.startswith("UPDATE"):
-            return self._update(command)
-        elif cmd_upper.startswith("DELETE FROM"):
-            return self._delete(command)
-        elif cmd_upper.startswith("DROP TABLE"):
-            return self._drop_table(command)
-        else:
-            return f"Unsupported SQL command: {command}"
+        try:
+            if cmd_upper.startswith("CREATE TABLE"):
+                result = self._create_table(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
+            elif cmd_upper.startswith("INSERT INTO"):
+                result = self._insert(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
+            elif cmd_upper.startswith("SELECT"):
+                result_str = self._select(command)
+                if result_str.startswith("Error:"):
+                    return ResponseFactory.error(result_str, status=400)
+                # Parse JSON result
+                try:
+                    rows = json.loads(result_str)
+                    if isinstance(rows, list) and rows and all(isinstance(r, dict) for r in rows):
+                        return ResponseFactory.table(rows, message="Query executed successfully")
+                    else:
+                        return ResponseFactory.json(rows, message="Query executed successfully")
+                except:
+                    return ResponseFactory.text(result_str, message="Query executed successfully")
+            elif cmd_upper.startswith("UPDATE"):
+                result = self._update(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
+            elif cmd_upper.startswith("DELETE FROM"):
+                result = self._delete(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
+            elif cmd_upper.startswith("DROP TABLE"):
+                result = self._drop_table(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
+            else:
+                return ResponseFactory.error(f"Unsupported SQL command: {command}", status=400)
+        except Exception as e:
+            logger.error(f"SQL execution failed: {e}")
+            return ResponseFactory.error(str(e), status=500)
 
     def _create_table(self, sql: str) -> str:
         try:

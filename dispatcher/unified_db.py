@@ -1,6 +1,8 @@
 # backend/dispatcher/unified_db.py
+import time
 from catalog.database_catalog import DatabaseCatalog
 from loguru import logger
+from utils.response import ResponseFactory, APIResponse
 
 class UnifiedDB:
     def __init__(self):
@@ -11,24 +13,39 @@ class UnifiedDB:
         self.catalog.use_database("default")
         logger.info("UnifiedDB initialized with default database")
 
-    def execute(self, command: str) -> str:
+    def execute(self, command: str) -> APIResponse:
+        start = time.perf_counter()
         cmd = command.strip()
-        if cmd.upper().startswith("DATABASE "):
-            return self._handle_database(cmd[9:].strip())
-        elif cmd.upper().startswith("SQL "):
-            try:
+        try:
+            if cmd.upper().startswith("DATABASE "):
+                result_msg = self._handle_database(cmd[9:].strip())
+                elapsed = (time.perf_counter() - start) * 1000
+                return ResponseFactory.text(result_msg, time_ms=elapsed)
+            elif cmd.upper().startswith("SQL "):
                 engine = self.catalog.get_current_sql_engine()
-                return engine.execute(cmd[4:].strip())
-            except Exception as e:
-                return f"SQL Error: {e}"
-        elif cmd.upper().startswith("NOSQL "):
-            try:
+                resp = engine.execute(cmd[4:].strip())
+                elapsed = (time.perf_counter() - start) * 1000
+                if isinstance(resp, APIResponse):
+                    resp.data.execution_time_ms = elapsed
+                return resp
+            elif cmd.upper().startswith("NOSQL "):
                 engine = self.catalog.get_current_nosql_engine()
-                return engine.execute(cmd[6:].strip())
-            except Exception as e:
-                return f"NoSQL Error: {e}"
-        else:
-            return "Unknown command. Use SQL ..., NOSQL ..., or DATABASE ..."
+                resp = engine.execute(cmd[6:].strip())
+                elapsed = (time.perf_counter() - start) * 1000
+                if isinstance(resp, APIResponse):
+                    resp.data.execution_time_ms = elapsed
+                return resp
+            else:
+                elapsed = (time.perf_counter() - start) * 1000
+                return ResponseFactory.error(
+                    "Unknown command. Use SQL ..., NOSQL ..., or DATABASE ...",
+                    status=400,
+                    time_ms=elapsed
+                )
+        except Exception as e:
+            elapsed = (time.perf_counter() - start) * 1000
+            logger.error(f"Execution failed: {e}")
+            return ResponseFactory.error(str(e), status=500, time_ms=elapsed)
 
     def _handle_database(self, rest: str) -> str:
         parts = rest.split(maxsplit=1)
