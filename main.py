@@ -3,6 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dispatcher.unified_db import UnifiedDB
 from loguru import logger
+from processor.nlp_processor import NLPProcessor
+from model.NLP_model import NLPRequest
+
+
 
 app = FastAPI()
 app.add_middleware(
@@ -13,7 +17,7 @@ app.add_middleware(
 )
 
 db = UnifiedDB()
-
+nlp_proc = NLPProcessor(db.catalog)
 class ExecuteRequest(BaseModel):
     command: str
 
@@ -26,3 +30,12 @@ def execute(req: ExecuteRequest):
 @app.get("/")
 def root():
     return {"message": "Unified DB API running"}
+
+
+@app.post("/api/nlp")
+def nlp_query(req: NLPRequest):
+    command = nlp_proc.process(req.text)
+    if not command:
+        return {"success": False, "message": "Could not understand request"}
+    resp = db.execute(command)
+    return {"success": True, "command": command, "result": resp.to_dict()}

@@ -1,0 +1,3 @@
+python -m spacy download en_core_web_sm
+
+(Optional for LLM fallback: install Ollama from https://ollama.com and pull a model like llama3 or phi.)
