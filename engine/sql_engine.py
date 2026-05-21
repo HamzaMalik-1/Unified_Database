@@ -115,30 +115,48 @@ class SQLDatabase:
             if not schema:
                 return f"Error: Table '{table_name}' does not exist"
             existing_rows = self.storage.get_table_data(table_name)
+
+            # Build value dictionary for specified columns
             if not specified_cols:
                 target_cols = [col["name"] for col in schema]
                 if len(raw_values) != len(target_cols):
-                    return f"Error: Expected {len(target_cols)} values for all columns, got {len(raw_values)}"
+                    return f"Error: Expected {len(target_cols)} values, got {len(raw_values)}"
                 value_dict = dict(zip(target_cols, raw_values))
             else:
                 schema_col_names = [col["name"] for col in schema]
                 for col in specified_cols:
                     if col not in schema_col_names:
-                        return f"Error: Column '{col}' does not exist in table '{table_name}'"
+                        return f"Error: Column '{col}' does not exist"
                 if len(specified_cols) != len(raw_values):
-                    return f"Error: Number of columns ({len(specified_cols)}) does not match number of values ({len(raw_values)})"
+                    return f"Error: Number of columns ({len(specified_cols)}) != number of values ({len(raw_values)})"
                 value_dict = dict(zip(specified_cols, raw_values))
-                target_cols = specified_cols
+
             row = {}
             for col_def in schema:
                 col_name = col_def["name"]
                 col_type = col_def["type"]
                 constraints = col_def["constraints"]
+                # Get provided value, if any
                 val = value_dict.get(col_name, None)
-                try:
-                    typed_val = DataType.validate(val, col_type) if val is not None else None
-                except ValueError as e:
-                    return f"Error in column '{col_name}': {e}"
+                # Apply default if value is None and default exists
+                if val is None:
+                    default_val = col_def.get("default")
+                    if default_val is not None:
+                        try:
+                            # Convert default value to the column type
+                            typed_val = DataType.validate(default_val, col_type)
+                        except Exception as e:
+                            logger.warning(f"Default value conversion failed for {col_name}: {e}")
+                            typed_val = default_val  # fallback
+                    else:
+                        typed_val = None
+                else:
+                    # Validate provided value
+                    try:
+                        typed_val = DataType.validate(val, col_type) if val is not None else None
+                    except ValueError as e:
+                        return f"Error in column '{col_name}': {e}"
+                # Check constraints
                 if "NOT NULL" in constraints and typed_val is None:
                     return f"Error: Column '{col_name}' cannot be NULL"
                 if "PRIMARY KEY" in constraints:
@@ -153,15 +171,13 @@ class SQLDatabase:
                         return f"Error: {e}"
                 row[col_name] = typed_val
 
-            # Check CHECK constraints BEFORE inserting
-            error = self._check_constraints(table_name, row)   # <-- MOVED HERE
+            # Check CHECK constraints and foreign keys
+            error = self._check_constraints(table_name, row)
             if error:
                 return error
-
-            # Check foreign keys BEFORE inserting
             for col_name, col_val in row.items():
                 if not self._check_parent_exists(table_name, col_name, col_val):
-                    return f"Error: Foreign key violation on {col_name}: value {col_val} not found in parent table"
+                    return f"Error: Foreign key violation on {col_name}: value {col_val} not found"
 
             existing_rows.append(row)
             self.storage.set_table_data(table_name, existing_rows)
@@ -170,6 +186,7 @@ class SQLDatabase:
         except Exception as e:
             logger.error(f"INSERT failed: {e}")
             return f"Error: {e}"
+        
     def _evaluate_condition(self, row: Dict, condition_str: str) -> bool:
         if not condition_str:
             return True
@@ -910,47 +927,42 @@ class SQLDatabase:
             if not schema:
                 return f"Error: Table '{table_name}' does not exist"
             operation = parsed["operation"]
+
             if operation == "ADD":
                 column_def = parsed["column_def"]
-                # Check if column already exists
                 existing_cols = [c["name"] for c in schema]
                 if column_def["name"] in existing_cols:
                     return f"Error: Column '{column_def['name']}' already exists in table '{table_name}'"
-                # Add column to schema
                 schema.append(column_def)
                 self.storage.set_schema(table_name, schema)
-                # Add NULL values for all existing rows (or default value if specified)
                 rows = self.storage.get_table_data(table_name)
+                default_val = column_def.get("default")
                 for row in rows:
-                    row[column_def["name"]] = None
+                    row[column_def["name"]] = default_val
                 self.storage.set_table_data(table_name, rows)
                 logger.info(f"Added column '{column_def['name']}' to table '{table_name}'")
                 return f"Column '{column_def['name']}' added to table '{table_name}'"
+
             elif operation == "DROP":
                 col_name = parsed["column_name"]
-                # Check if column exists
                 if col_name not in [c["name"] for c in schema]:
                     return f"Error: Column '{col_name}' does not exist in table '{table_name}'"
-                # Remove column from schema
                 new_schema = [c for c in schema if c["name"] != col_name]
                 self.storage.set_schema(table_name, new_schema)
-                # Remove column from all rows
                 rows = self.storage.get_table_data(table_name)
                 for row in rows:
                     if col_name in row:
                         del row[col_name]
                 self.storage.set_table_data(table_name, rows)
-                # Drop any indexes that use this column
-                indexes_to_drop = []
-                for idx_name, idx_info in self.storage.data['indexes'].items():
-                    if idx_info["table"] == table_name and idx_info["column"] == col_name:
-                        indexes_to_drop.append(idx_name)
-                for idx_name in indexes_to_drop:
-                    del self.storage.data['indexes'][idx_name]
-                    logger.info(f"Dropped index '{idx_name}' because column '{col_name}' was removed")
+                indexes_to_drop = [idx for idx, info in self.storage.data['indexes'].items()
+                                if info["table"] == table_name and info["column"] == col_name]
+                for idx in indexes_to_drop:
+                    del self.storage.data['indexes'][idx]
+                    logger.info(f"Dropped index '{idx}' because column '{col_name}' was removed")
                 self.storage.save()
                 logger.info(f"Dropped column '{col_name}' from table '{table_name}'")
                 return f"Column '{col_name}' dropped from table '{table_name}'"
+
             elif operation == "RENAME_COLUMN":
                 old_name = parsed["old_column"]
                 new_name = parsed["new_column"]
@@ -958,45 +970,43 @@ class SQLDatabase:
                     return f"Error: Column '{old_name}' does not exist in table '{table_name}'"
                 if new_name in [c["name"] for c in schema]:
                     return f"Error: Column '{new_name}' already exists in table '{table_name}'"
-                # Update schema
                 for col in schema:
                     if col["name"] == old_name:
                         col["name"] = new_name
                         break
                 self.storage.set_schema(table_name, schema)
-                # Update rows
                 rows = self.storage.get_table_data(table_name)
                 for row in rows:
                     if old_name in row:
                         row[new_name] = row.pop(old_name)
                 self.storage.set_table_data(table_name, rows)
-                # Update indexes that use this column
-                for idx_name, idx_info in self.storage.data['indexes'].items():
-                    if idx_info["table"] == table_name and idx_info["column"] == old_name:
-                        idx_info["column"] = new_name
-                        # Rebuild index map? Not necessary because values unchanged, just key name.
-                        # But the map keys are values, not column names. The map is unchanged.
+                for info in self.storage.data['indexes'].values():
+                    if info["table"] == table_name and info["column"] == old_name:
+                        info["column"] = new_name
                 self.storage.save()
                 logger.info(f"Renamed column '{old_name}' to '{new_name}' in table '{table_name}'")
                 return f"Column '{old_name}' renamed to '{new_name}'"
+
             elif operation == "RENAME_TABLE":
                 new_table_name = parsed["new_table_name"]
                 if self.storage.get_schema(new_table_name):
                     return f"Error: Table '{new_table_name}' already exists"
-                # Rename schema and data
                 self.storage.data["schemas"][new_table_name] = self.storage.data["schemas"].pop(table_name)
                 self.storage.data["tables"][new_table_name] = self.storage.data["tables"].pop(table_name)
-                # Update indexes that reference the table
-                for idx_name, idx_info in self.storage.data['indexes'].items():
-                    if idx_info["table"] == table_name:
-                        idx_info["table"] = new_table_name
+                if table_name in self.storage.data['foreign_keys']:
+                    self.storage.data['foreign_keys'][new_table_name] = self.storage.data['foreign_keys'].pop(table_name)
+                if table_name in self.storage.data['check_constraints']:
+                    self.storage.data['check_constraints'][new_table_name] = self.storage.data['check_constraints'].pop(table_name)
+                for info in self.storage.data['indexes'].values():
+                    if info["table"] == table_name:
+                        info["table"] = new_table_name
                 self.storage.save()
                 logger.info(f"Renamed table '{table_name}' to '{new_table_name}'")
                 return f"Table '{table_name}' renamed to '{new_table_name}'"
+
             elif operation == "ADD_CHECK":
                 check_name = parsed["check_name"]
                 expr = parsed["expression"]
-                # Optionally store check_name and expression
                 if 'check_constraints' not in self.storage.data:
                     self.storage.data['check_constraints'] = {}
                 checks = self.storage.data['check_constraints'].get(table_name, [])
@@ -1004,6 +1014,28 @@ class SQLDatabase:
                 self.storage.data['check_constraints'][table_name] = checks
                 self.storage.save()
                 return f"Check constraint '{check_name}' added to table '{table_name}'"
+
+            elif operation == "SET_DEFAULT":
+                col_name = parsed["column"]
+                default_val = parsed["default_value"]
+                for col in schema:
+                    if col["name"] == col_name:
+                        col["default"] = default_val
+                        self.storage.set_schema(table_name, schema)
+                        self.storage.save()
+                        return f"Default value set for column '{col_name}'"
+                return f"Error: Column '{col_name}' not found in table '{table_name}'"
+
+            elif operation == "DROP_DEFAULT":
+                col_name = parsed["column"]
+                for col in schema:
+                    if col["name"] == col_name:
+                        col["default"] = None
+                        self.storage.set_schema(table_name, schema)
+                        self.storage.save()
+                        return f"Default value dropped for column '{col_name}'"
+                return f"Error: Column '{col_name}' not found in table '{table_name}'"
+
             else:
                 return f"Error: Unknown ALTER TABLE operation '{operation}'"
         except Exception as e:

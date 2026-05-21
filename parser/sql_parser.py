@@ -479,7 +479,7 @@ class SQLParser:
         if not match:
             raise ValueError("Invalid DROP TABLE syntax. Expected: DROP TABLE table_name")
         return match.group(1)
-
+    
     @staticmethod
     def extract_subqueries(where_clause: str) -> List[Tuple[str, str]]:
         """
@@ -506,7 +506,6 @@ class SQLParser:
     def parse_create_index(sql: str) -> Dict[str, Any]:
         """
         Parses: CREATE INDEX index_name ON table_name (column_name)
-        Returns dict: {"index_name": str, "table_name": str, "column": str}
         """
         pattern = r"CREATE\s+INDEX\s+(\w+)\s+ON\s+(\w+)\s*\(\s*(\w+)\s*\)"
         match = re.match(pattern, sql, re.IGNORECASE)
@@ -518,11 +517,11 @@ class SQLParser:
             "column": match.group(3)
         }
 
+
     @staticmethod
     def parse_drop_index(sql: str) -> str:
         """
         Parses: DROP INDEX index_name
-        Returns: index_name
         """
         pattern = r"DROP\s+INDEX\s+(\w+)"
         match = re.match(pattern, sql, re.IGNORECASE)
@@ -530,10 +529,20 @@ class SQLParser:
             raise ValueError("Invalid DROP INDEX syntax. Expected: DROP INDEX index_name")
         return match.group(1)
     
-    # backend/parser/sql_parser.py – inside SQLParser class
-
+    
+    
     @staticmethod
     def parse_alter_table(sql: str) -> Dict[str, Any]:
+        """
+        Parses:
+          ALTER TABLE table_name ADD column_name datatype [DEFAULT value] [constraints]
+          ALTER TABLE table_name DROP COLUMN column_name
+          ALTER TABLE table_name RENAME COLUMN old_name TO new_name
+          ALTER TABLE table_name RENAME TO new_table_name
+          ALTER TABLE table_name ADD CONSTRAINT check_name CHECK (expression)
+          ALTER TABLE table_name ALTER COLUMN column_name SET DEFAULT value
+          ALTER TABLE table_name ALTER COLUMN column_name DROP DEFAULT
+        """
         sql = sql.strip()
         # RENAME TABLE
         rename_table_match = re.match(r"ALTER\s+TABLE\s+(\w+)\s+RENAME\s+TO\s+(\w+)", sql, re.IGNORECASE)
@@ -575,8 +584,25 @@ class SQLParser:
             table_name = add_match.group(1)
             col_name = add_match.group(2)
             col_type = add_match.group(3).upper()
-            constraints_str = add_match.group(4) if add_match.group(4) else ""
-            constraints = [c.upper() for c in constraints_str.strip().split()] if constraints_str else []
+            rest = add_match.group(4) if add_match.group(4) else ""
+            default_value = None
+            constraints = []
+            # Tokenise the rest (simple split)
+            tokens = re.findall(r'[^\s]+', rest)
+            i = 0
+            while i < len(tokens):
+                token = tokens[i].upper()
+                if token == 'DEFAULT':
+                    i += 1
+                    if i >= len(tokens):
+                        raise ValueError(f"DEFAULT value missing for column {col_name}")
+                    default_value = tokens[i]
+                    if default_value.startswith("'") and default_value.endswith("'"):
+                        default_value = default_value[1:-1]
+                    i += 1
+                else:
+                    constraints.append(token)
+                    i += 1
             if "PRIMARY" in constraints and "KEY" in constraints:
                 constraints.remove("PRIMARY")
                 constraints.remove("KEY")
@@ -588,16 +614,148 @@ class SQLParser:
             column_def = {
                 "name": col_name,
                 "type": col_type,
-                "constraints": constraints
+                "constraints": constraints,
+                "default": default_value
             }
             return {
                 "table_name": table_name,
                 "operation": "ADD",
                 "column_def": column_def
             }
+        # SET DEFAULT
+        set_default_match = re.match(r"ALTER\s+TABLE\s+(\w+)\s+ALTER\s+COLUMN\s+(\w+)\s+SET\s+DEFAULT\s+(.+)", sql, re.IGNORECASE)
+        if set_default_match:
+            return {
+                "table_name": set_default_match.group(1),
+                "operation": "SET_DEFAULT",
+                "column": set_default_match.group(2),
+                "default_value": set_default_match.group(3).strip()
+            }
+        # DROP DEFAULT
+        drop_default_match = re.match(r"ALTER\s+TABLE\s+(\w+)\s+ALTER\s+COLUMN\s+(\w+)\s+DROP\s+DEFAULT", sql, re.IGNORECASE)
+        if drop_default_match:
+            return {
+                "table_name": drop_default_match.group(1),
+                "operation": "DROP_DEFAULT",
+                "column": drop_default_match.group(2)
+            }
         raise ValueError("Invalid ALTER TABLE syntax")
-    
-    
+
+    # backend/parser/sql_parser.py – inside SQLParser class
+
+    @staticmethod
+    def parse_create_table(sql: str) -> Dict[str, Any]:
+        pattern = r"CREATE\s+TABLE\s+(\w+)\s*\((.*)\)"
+        match = re.match(pattern, sql, re.IGNORECASE)
+        if not match:
+            raise ValueError("Invalid CREATE TABLE syntax")
+        table_name = match.group(1)
+        columns_def = match.group(2).strip()
+
+        columns = []
+        foreign_keys = []
+        checks = []
+
+        # Split columns by commas, respecting parentheses
+        col_parts = []
+        current = []
+        paren_depth = 0
+        for ch in columns_def:
+            if ch == '(':
+                paren_depth += 1
+            elif ch == ')':
+                paren_depth -= 1
+            elif ch == ',' and paren_depth == 0:
+                col_parts.append(''.join(current).strip())
+                current = []
+                continue
+            current.append(ch)
+        if current:
+            col_parts.append(''.join(current).strip())
+
+        for col_str in col_parts:
+            col_str = col_str.strip()
+            if not col_str:
+                continue
+            # Split into tokens (simplified, assumes no spaces inside quotes)
+            tokens = re.findall(r'[^\s]+', col_str)
+            if len(tokens) < 2:
+                raise ValueError(f"Invalid column definition: '{col_str}'")
+            col_name = tokens[0]
+            col_type = tokens[1].upper()
+            default_value = None
+            constraints = []
+            i = 2
+            while i < len(tokens):
+                token = tokens[i].upper()
+                if token == 'DEFAULT':
+                    i += 1
+                    if i >= len(tokens):
+                        raise ValueError(f"DEFAULT value missing for column {col_name}")
+                    default_value = tokens[i]
+                    # Remove surrounding quotes if present
+                    if default_value.startswith("'") and default_value.endswith("'"):
+                        default_value = default_value[1:-1]
+                    i += 1
+                else:
+                    constraints.append(token)
+                    i += 1
+            # Clean up multi-word constraints
+            if "PRIMARY" in constraints and "KEY" in constraints:
+                constraints.remove("PRIMARY")
+                constraints.remove("KEY")
+                constraints.append("PRIMARY KEY")
+            if "NOT" in constraints and "NULL" in constraints:
+                constraints.remove("NOT")
+                constraints.remove("NULL")
+                constraints.append("NOT NULL")
+            columns.append({
+                "name": col_name,
+                "type": col_type,
+                "constraints": constraints,
+                "default": default_value
+            })
+
+            # Inline foreign key detection
+            ref_match = re.search(r'REFERENCES\s+(\w+)\s*\(\s*(\w+)\s*\)', col_str, re.IGNORECASE)
+            if ref_match:
+                foreign_keys.append({
+                    "column": col_name,
+                    "ref_table": ref_match.group(1),
+                    "ref_column": ref_match.group(2),
+                    "on_delete": 'RESTRICT',
+                    "on_update": 'RESTRICT'
+                })
+
+        # Standalone FOREIGN KEY clauses
+        fk_pattern = r"FOREIGN\s+KEY\s*\(\s*(\w+)\s*\)\s+REFERENCES\s+(\w+)\s*\(\s*(\w+)\s*\)(?:\s+ON\s+DELETE\s+(\w+))?(?:\s+ON\s+UPDATE\s+(\w+))?"
+        for match in re.finditer(fk_pattern, columns_def, re.IGNORECASE):
+            col = match.group(1)
+            ref_table = match.group(2)
+            ref_col = match.group(3)
+            on_delete = match.group(4).upper() if match.group(4) else 'RESTRICT'
+            on_update = match.group(5).upper() if match.group(5) else 'RESTRICT'
+            foreign_keys.append({
+                "column": col,
+                "ref_table": ref_table,
+                "ref_column": ref_col,
+                "on_delete": on_delete,
+                "on_update": on_update
+            })
+
+        # CHECK constraints
+        check_pattern = r"CHECK\s*\(\s*(.+?)\s*\)"
+        for match in re.finditer(check_pattern, columns_def, re.IGNORECASE):
+            expr = match.group(1).strip()
+            checks.append(expr)
+
+        return {
+            "table_name": table_name,
+            "columns": columns,
+            "foreign_keys": foreign_keys,
+            "checks": checks
+        }
+   
     @staticmethod
     def _parse_foreign_key_clause(clause: str) -> Dict[str, Any]:
         """

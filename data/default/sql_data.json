@@ -4,19 +4,14 @@
       {
         "name": "id",
         "type": "INT",
-        "constraints": [
-          "PRIMARY KEY"
-        ]
+        "constraints": [],
+        "default": null
       },
       {
-        "name": "age",
-        "type": "INT",
-        "constraints": [
-          "CHECK",
-          "(AGE",
-          ">=",
-          "0)"
-        ]
+        "name": "name",
+        "type": "TEXT",
+        "constraints": [],
+        "default": null
       }
     ]
   },
@@ -24,7 +19,19 @@
     "users": [
       {
         "id": 1,
-        "age": 123
+        "name": null
+      },
+      {
+        "id": 2,
+        "name": null
+      },
+      {
+        "id": 3,
+        "name": "Guest"
+      },
+      {
+        "id": 22,
+        "name": "'Anonymous'"
       }
     ]
   },
@@ -33,9 +40,6 @@
     "users": []
   },
   "check_constraints": {
-    "users": [
-      "age >= 0",
-      "age <= 150"
-    ]
+    "users": []
   }
 }
