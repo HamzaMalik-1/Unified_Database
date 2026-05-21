@@ -9,21 +9,14 @@
         ]
       },
       {
-        "name": "name",
-        "type": "TEXT",
-        "constraints": []
-      }
-    ],
-    "orders": [
-      {
-        "name": "id",
+        "name": "age",
         "type": "INT",
-        "constraints": []
-      },
-      {
-        "name": "user_id",
-        "type": "INT",
-        "constraints": []
+        "constraints": [
+          "CHECK",
+          "(AGE",
+          ">=",
+          "0)"
+        ]
       }
     ]
   },
@@ -31,27 +24,18 @@
     "users": [
       {
         "id": 1,
-        "name": "Alice"
-      }
-    ],
-    "orders": [
-      {
-        "id": 1,
-        "user_id": 1
+        "age": 123
       }
     ]
   },
   "indexes": {},
   "foreign_keys": {
-    "users": [],
-    "orders": [
-      {
-        "column": "user_id",
-        "ref_table": "users",
-        "ref_column": "id",
-        "on_delete": "RESTRICT",
-        "on_update": "RESTRICT"
-      }
+    "users": []
+  },
+  "check_constraints": {
+    "users": [
+      "age >= 0",
+      "age <= 150"
     ]
   }
 }

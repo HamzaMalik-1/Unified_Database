@@ -106,7 +106,15 @@ class SQLParser:
                 "on_update": on_update
             })
 
-        return {"table_name": table_name, "columns": columns, "foreign_keys": foreign_keys}       
+        # inside parse_create_table, after collecting foreign_keys, add:
+        checks = []
+        # Pattern for CHECK ( ... ) – capture everything inside parentheses
+        check_pattern = r"CHECK\s*\(\s*(.+?)\s*\)"
+        for match in re.finditer(check_pattern, columns_def, re.IGNORECASE):
+            expr = match.group(1).strip()
+            checks.append(expr)
+
+        return {"table_name": table_name, "columns": columns, "foreign_keys": foreign_keys,"checks": checks}       
 
     @staticmethod
     def parse_insert(sql: str) -> Dict[str, Any]:
@@ -526,20 +534,6 @@ class SQLParser:
 
     @staticmethod
     def parse_alter_table(sql: str) -> Dict[str, Any]:
-        """
-        Parses:
-        ALTER TABLE table_name ADD column_name datatype [constraints]
-        ALTER TABLE table_name DROP COLUMN column_name
-        ALTER TABLE table_name RENAME COLUMN old_name TO new_name
-        ALTER TABLE table_name RENAME TO new_table_name
-        Returns dict with keys:
-        "table_name": str,
-        "operation": "ADD"|"DROP"|"RENAME_COLUMN"|"RENAME_TABLE",
-        "column_def": dict (for ADD),
-        "column_name": str (for DROP),
-        "old_column": str, "new_column": str (for RENAME_COLUMN),
-        "new_table_name": str (for RENAME_TABLE)
-        """
         sql = sql.strip()
         # RENAME TABLE
         rename_table_match = re.match(r"ALTER\s+TABLE\s+(\w+)\s+RENAME\s+TO\s+(\w+)", sql, re.IGNORECASE)
@@ -566,6 +560,15 @@ class SQLParser:
                 "operation": "DROP",
                 "column_name": drop_match.group(2)
             }
+        # ADD CONSTRAINT CHECK (must come before ADD COLUMN)
+        add_check_match = re.match(r"ALTER\s+TABLE\s+(\w+)\s+ADD\s+CONSTRAINT\s+(\w+)\s+CHECK\s*\(\s*(.+?)\s*\)", sql, re.IGNORECASE)
+        if add_check_match:
+            return {
+                "table_name": add_check_match.group(1),
+                "operation": "ADD_CHECK",
+                "check_name": add_check_match.group(2),
+                "expression": add_check_match.group(3)
+            }
         # ADD COLUMN
         add_match = re.match(r"ALTER\s+TABLE\s+(\w+)\s+ADD\s+(\w+)\s+(\w+)(?:\s+(.*))?", sql, re.IGNORECASE)
         if add_match:
@@ -574,7 +577,6 @@ class SQLParser:
             col_type = add_match.group(3).upper()
             constraints_str = add_match.group(4) if add_match.group(4) else ""
             constraints = [c.upper() for c in constraints_str.strip().split()] if constraints_str else []
-            # Handle PRIMARY KEY and NOT NULL as before
             if "PRIMARY" in constraints and "KEY" in constraints:
                 constraints.remove("PRIMARY")
                 constraints.remove("KEY")

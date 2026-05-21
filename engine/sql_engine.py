@@ -16,6 +16,8 @@ class SQLDatabase:
             self.storage.data['indexes'] = {}
         if 'foreign_keys' not in self.storage.data:
             self.storage.data['foreign_keys'] = {}
+        if 'check_constraints' not in self.storage.data:
+            self.storage.data['check_constraints'] = {}   # <-- FIXED
         self.storage.save()
         self.nosql_engine = None
 
@@ -84,22 +86,24 @@ class SQLDatabase:
             return ResponseFactory.error(str(e), status=500)
 
     def _create_table(self, sql: str) -> str:
-        try:
-            parsed = SQLParser.parse_create_table(sql)
-            table_name = parsed["table_name"]
-            columns = parsed["columns"]
-            foreign_keys = parsed.get("foreign_keys", [])
-            if self.storage.get_schema(table_name):
-                return f"Error: Table '{table_name}' already exists"
-            self.storage.set_schema(table_name, columns)
-            self.storage.set_table_data(table_name, [])
-            self.storage.data['foreign_keys'][table_name] = foreign_keys
-            self.storage.save()
-            logger.info(f"Table '{table_name}' created with {len(foreign_keys)} foreign keys")
-            return f"Table '{table_name}' created successfully"
-        except Exception as e:
-            logger.error(f"CREATE TABLE failed: {e}")
-            return f"Error: {e}"
+            try:
+                parsed = SQLParser.parse_create_table(sql)
+                table_name = parsed["table_name"]
+                columns = parsed["columns"]
+                foreign_keys = parsed.get("foreign_keys", [])
+                checks = parsed.get("checks", [])                     # <-- ADDED
+                if self.storage.get_schema(table_name):
+                    return f"Error: Table '{table_name}' already exists"
+                self.storage.set_schema(table_name, columns)
+                self.storage.set_table_data(table_name, [])
+                self.storage.data['foreign_keys'][table_name] = foreign_keys
+                self.storage.data['check_constraints'][table_name] = checks   # <-- ADDED
+                self.storage.save()
+                logger.info(f"Table '{table_name}' created with {len(foreign_keys)} foreign keys, {len(checks)} checks")
+                return f"Table '{table_name}' created successfully"
+            except Exception as e:
+                logger.error(f"CREATE TABLE failed: {e}")
+                return f"Error: {e}"
 
     def _insert(self, sql: str) -> str:
         try:
@@ -148,10 +152,17 @@ class SQLDatabase:
                     except ValueError as e:
                         return f"Error: {e}"
                 row[col_name] = typed_val
+
+            # Check CHECK constraints BEFORE inserting
+            error = self._check_constraints(table_name, row)   # <-- MOVED HERE
+            if error:
+                return error
+
             # Check foreign keys BEFORE inserting
             for col_name, col_val in row.items():
                 if not self._check_parent_exists(table_name, col_name, col_val):
                     return f"Error: Foreign key violation on {col_name}: value {col_val} not found in parent table"
+
             existing_rows.append(row)
             self.storage.set_table_data(table_name, existing_rows)
             logger.info(f"Inserted row into '{table_name}': {row}")
@@ -159,7 +170,6 @@ class SQLDatabase:
         except Exception as e:
             logger.error(f"INSERT failed: {e}")
             return f"Error: {e}"
-
     def _evaluate_condition(self, row: Dict, condition_str: str) -> bool:
         if not condition_str:
             return True
@@ -489,21 +499,26 @@ class SQLDatabase:
             table_name = parsed["table"]
             set_assignments = parsed["set"]
             where_cond = parsed["where"]
+
             schema = self.storage.get_schema(table_name)
             if not schema:
                 return f"Error: Table '{table_name}' does not exist"
             rows = self.storage.get_table_data(table_name)
             if not rows:
                 return "Update completed (0 rows affected)"
+
             schema_cols = {col["name"]: col for col in schema}
             for col in set_assignments.keys():
                 if col not in schema_cols:
                     return f"Error: Column '{col}' does not exist in table '{table_name}'"
+
             updated_count = 0
             for row in rows:
                 if where_cond and not self._evaluate_condition(row, where_cond):
                     continue
-                # For each assignment, check foreign keys before applying update? Simple approach: check after update.
+
+                # Apply updates to a copy to avoid partial updates if constraints fail
+                updated_row = row.copy()
                 for col, val in set_assignments.items():
                     col_def = schema_cols[col]
                     try:
@@ -512,18 +527,28 @@ class SQLDatabase:
                         return f"Error in column '{col}': {e}"
                     if typed_val is None and "NOT NULL" in col_def["constraints"]:
                         return f"Error: Column '{col}' cannot be NULL"
-                    # For foreign key column, check if new value exists in parent
+                    # Foreign key check
                     if not self._check_parent_exists(table_name, col, typed_val):
                         return f"Error: Foreign key violation on {col}: value {typed_val} not found in parent table"
-                    row[col] = typed_val
+                    updated_row[col] = typed_val
+
+                # **CHECK CONSTRAINTS AFTER UPDATE**
+                error = self._check_constraints(table_name, updated_row)
+                if error:
+                    return error
+
+                # All checks passed, apply the update to the real row
+                for col, val in set_assignments.items():
+                    row[col] = updated_row[col]
                 updated_count += 1
+
             self.storage.set_table_data(table_name, rows)
             logger.info(f"Updated {updated_count} row(s) in '{table_name}'")
             return f"Update successful. {updated_count} row(s) affected."
         except Exception as e:
             logger.error(f"UPDATE failed: {e}")
             return f"Error: {e}"
-
+        
     def _delete(self, sql: str) -> str:
         try:
             parsed = SQLParser.parse_delete(sql)
@@ -968,6 +993,17 @@ class SQLDatabase:
                 self.storage.save()
                 logger.info(f"Renamed table '{table_name}' to '{new_table_name}'")
                 return f"Table '{table_name}' renamed to '{new_table_name}'"
+            elif operation == "ADD_CHECK":
+                check_name = parsed["check_name"]
+                expr = parsed["expression"]
+                # Optionally store check_name and expression
+                if 'check_constraints' not in self.storage.data:
+                    self.storage.data['check_constraints'] = {}
+                checks = self.storage.data['check_constraints'].get(table_name, [])
+                checks.append(expr)
+                self.storage.data['check_constraints'][table_name] = checks
+                self.storage.save()
+                return f"Check constraint '{check_name}' added to table '{table_name}'"
             else:
                 return f"Error: Unknown ALTER TABLE operation '{operation}'"
         except Exception as e:
@@ -1021,3 +1057,11 @@ class SQLDatabase:
                                 raise Exception(f"Referenced row exists in {child_table}.{child_col}")
                     if updated:
                         self.storage.save()
+                            
+    def _check_constraints(self, table_name: str, row: Dict) -> Optional[str]:
+        checks = self.storage.data['check_constraints'].get(table_name, [])
+        for expr in checks:
+            # Evaluate expression using existing _evaluate_condition (which uses eval with row as locals)
+            if not self._evaluate_condition(row, expr):
+                return f"Check constraint violated: {expr}"
+        return None
