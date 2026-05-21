@@ -39,3 +39,8 @@ def nlp_query(req: NLPRequest):
         return {"success": False, "message": "Could not understand request"}
     resp = db.execute(command)
     return {"success": True, "command": command, "result": resp.to_dict()}
+
+@app.post("/api/nlp/llm")
+def nlp_llm_only(req: NLPRequest):
+    command = nlp_proc._llm_fallback(req.text)
+    return {"command": command}

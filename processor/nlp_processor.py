@@ -1,4 +1,4 @@
-# backend/nlp_processor.py
+# backend/processor/nlp_processor.py
 import re
 from typing import Optional, List
 from word2number import w2n
@@ -8,6 +8,16 @@ class NLPProcessor:
         self.catalog = catalog
 
     def process(self, text: str) -> Optional[str]:
+        """Public method: try rule‑based, then LLM fallback."""
+        # First try rule‑based
+        command = self._rule_based(text)
+        if command:
+            return command
+        # Fallback to local LLM (Ollama) – optional, implement if you have Ollama installed
+        # return self._llm_fallback(text)
+        return None  # Return None if both fail
+
+    def _rule_based(self, text: str) -> Optional[str]:
         text = text.lower().strip()
         intent = self._classify_intent(text)
         if not intent:
@@ -80,19 +90,16 @@ class NLPProcessor:
         return None
 
     def _extract_condition(self, text: str) -> Optional[str]:
-        # Special handling for "with id" pattern
-        # Example: "delete user with id 2" -> field="id", value=2
+        # Special case: "... with id ..."
         id_match = re.search(r"with\s+id\s+(\d+)", text)
         if id_match:
             value = id_match.group(1)
-            # Convert word numbers if any
             try:
                 value = str(w2n.word_to_num(value))
             except:
                 pass
             return f"id = {value}"
 
-        # Other patterns: field op value
         patterns = [
             (r"(\w+)\s+is\s+['\"]?([^'\"]+)['\"]?", ("=", 1, 2)),
             (r"(\w+)\s+equal[s]?\s+to\s+['\"]?([^'\"]+)['\"]?", ("=", 1, 2)),
@@ -192,3 +199,27 @@ class NLPProcessor:
             coll = match.group(1)
             return f"NOSQL DROP COLLECTION {coll}"
         return None
+
+    def _llm_fallback(self, text: str) -> Optional[str]:
+        """Optional: use local Ollama LLM as fallback."""
+        prompt = f"""You are a database assistant. Convert the following user request into a SQL or NoSQL command.
+The command must start with either "SQL" or "NOSQL".
+Only output the command, nothing else.
+
+User request: {text}
+
+Command:"""
+        try:
+            import requests
+            response = requests.post(
+                "http://localhost:11434/api/generate",
+                json={"model": "phi3:mini", "prompt": prompt, "stream": False, "temperature": 0},
+                timeout=30
+            )
+            result = response.json().get("response", "").strip()
+            if result.upper().startswith("SQL") or result.upper().startswith("NOSQL"):
+                return result
+            return None
+        except Exception as e:
+            print(f"LLM error: {e}")
+            return None
