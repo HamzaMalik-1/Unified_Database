@@ -30,6 +30,20 @@
         "type": "TEXT",
         "constraints": []
       }
+    ],
+    "customers": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ]
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "constraints": []
+      }
     ]
   },
   "tables": {
@@ -38,7 +52,8 @@
         "id": 1,
         "name": "Alice"
       }
-    ]
+    ],
+    "customers": []
   },
   "indexes": {}
 }

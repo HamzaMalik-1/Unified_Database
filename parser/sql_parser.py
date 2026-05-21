@@ -450,3 +450,76 @@ class SQLParser:
         if not match:
             raise ValueError("Invalid DROP INDEX syntax. Expected: DROP INDEX index_name")
         return match.group(1)
+    
+    # backend/parser/sql_parser.py – inside SQLParser class
+
+    @staticmethod
+    def parse_alter_table(sql: str) -> Dict[str, Any]:
+        """
+        Parses:
+        ALTER TABLE table_name ADD column_name datatype [constraints]
+        ALTER TABLE table_name DROP COLUMN column_name
+        ALTER TABLE table_name RENAME COLUMN old_name TO new_name
+        ALTER TABLE table_name RENAME TO new_table_name
+        Returns dict with keys:
+        "table_name": str,
+        "operation": "ADD"|"DROP"|"RENAME_COLUMN"|"RENAME_TABLE",
+        "column_def": dict (for ADD),
+        "column_name": str (for DROP),
+        "old_column": str, "new_column": str (for RENAME_COLUMN),
+        "new_table_name": str (for RENAME_TABLE)
+        """
+        sql = sql.strip()
+        # RENAME TABLE
+        rename_table_match = re.match(r"ALTER\s+TABLE\s+(\w+)\s+RENAME\s+TO\s+(\w+)", sql, re.IGNORECASE)
+        if rename_table_match:
+            return {
+                "table_name": rename_table_match.group(1),
+                "operation": "RENAME_TABLE",
+                "new_table_name": rename_table_match.group(2)
+            }
+        # RENAME COLUMN
+        rename_col_match = re.match(r"ALTER\s+TABLE\s+(\w+)\s+RENAME\s+COLUMN\s+(\w+)\s+TO\s+(\w+)", sql, re.IGNORECASE)
+        if rename_col_match:
+            return {
+                "table_name": rename_col_match.group(1),
+                "operation": "RENAME_COLUMN",
+                "old_column": rename_col_match.group(2),
+                "new_column": rename_col_match.group(3)
+            }
+        # DROP COLUMN
+        drop_match = re.match(r"ALTER\s+TABLE\s+(\w+)\s+DROP\s+COLUMN\s+(\w+)", sql, re.IGNORECASE)
+        if drop_match:
+            return {
+                "table_name": drop_match.group(1),
+                "operation": "DROP",
+                "column_name": drop_match.group(2)
+            }
+        # ADD COLUMN
+        add_match = re.match(r"ALTER\s+TABLE\s+(\w+)\s+ADD\s+(\w+)\s+(\w+)(?:\s+(.*))?", sql, re.IGNORECASE)
+        if add_match:
+            table_name = add_match.group(1)
+            col_name = add_match.group(2)
+            col_type = add_match.group(3).upper()
+            constraints_str = add_match.group(4) if add_match.group(4) else ""
+            constraints = [c.upper() for c in constraints_str.strip().split()] if constraints_str else []
+            # Handle PRIMARY KEY and NOT NULL as before
+            if "PRIMARY" in constraints and "KEY" in constraints:
+                constraints.remove("PRIMARY")
+                constraints.remove("KEY")
+                constraints.append("PRIMARY KEY")
+            if "NOT" in constraints and "NULL" in constraints:
+                constraints.remove("NOT")
+                constraints.remove("NULL")
+                constraints.append("NOT NULL")
+            column_def = {
+                "name": col_name,
+                "type": col_type,
+                "constraints": constraints
+            }
+            return {
+                "table_name": table_name,
+                "operation": "ADD",
+                "column_def": column_def
+            }
+        raise ValueError("Invalid ALTER TABLE syntax")

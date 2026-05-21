@@ -70,6 +70,11 @@ class SQLDatabase:
                 if result.startswith("Error:"):
                     return ResponseFactory.error(result, status=400)
                 return ResponseFactory.text(result)
+            elif cmd_upper.startswith("ALTER TABLE"):
+                result = self._alter_table(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
             else:
                 return ResponseFactory.error(f"Unsupported SQL command: {command}", status=400)
         except Exception as e:
@@ -816,3 +821,101 @@ class SQLDatabase:
             if idx_info["table"] == table and idx_info["column"] == column:
                 return (idx_name, value)
         return None
+    
+        
+    def _alter_table(self, sql: str) -> str:
+        try:
+            parsed = SQLParser.parse_alter_table(sql)
+            table_name = parsed["table_name"]
+            schema = self.storage.get_schema(table_name)
+            if not schema:
+                return f"Error: Table '{table_name}' does not exist"
+            operation = parsed["operation"]
+            if operation == "ADD":
+                column_def = parsed["column_def"]
+                # Check if column already exists
+                existing_cols = [c["name"] for c in schema]
+                if column_def["name"] in existing_cols:
+                    return f"Error: Column '{column_def['name']}' already exists in table '{table_name}'"
+                # Add column to schema
+                schema.append(column_def)
+                self.storage.set_schema(table_name, schema)
+                # Add NULL values for all existing rows (or default value if specified)
+                rows = self.storage.get_table_data(table_name)
+                for row in rows:
+                    row[column_def["name"]] = None
+                self.storage.set_table_data(table_name, rows)
+                logger.info(f"Added column '{column_def['name']}' to table '{table_name}'")
+                return f"Column '{column_def['name']}' added to table '{table_name}'"
+            elif operation == "DROP":
+                col_name = parsed["column_name"]
+                # Check if column exists
+                if col_name not in [c["name"] for c in schema]:
+                    return f"Error: Column '{col_name}' does not exist in table '{table_name}'"
+                # Remove column from schema
+                new_schema = [c for c in schema if c["name"] != col_name]
+                self.storage.set_schema(table_name, new_schema)
+                # Remove column from all rows
+                rows = self.storage.get_table_data(table_name)
+                for row in rows:
+                    if col_name in row:
+                        del row[col_name]
+                self.storage.set_table_data(table_name, rows)
+                # Drop any indexes that use this column
+                indexes_to_drop = []
+                for idx_name, idx_info in self.storage.data['indexes'].items():
+                    if idx_info["table"] == table_name and idx_info["column"] == col_name:
+                        indexes_to_drop.append(idx_name)
+                for idx_name in indexes_to_drop:
+                    del self.storage.data['indexes'][idx_name]
+                    logger.info(f"Dropped index '{idx_name}' because column '{col_name}' was removed")
+                self.storage.save()
+                logger.info(f"Dropped column '{col_name}' from table '{table_name}'")
+                return f"Column '{col_name}' dropped from table '{table_name}'"
+            elif operation == "RENAME_COLUMN":
+                old_name = parsed["old_column"]
+                new_name = parsed["new_column"]
+                if old_name not in [c["name"] for c in schema]:
+                    return f"Error: Column '{old_name}' does not exist in table '{table_name}'"
+                if new_name in [c["name"] for c in schema]:
+                    return f"Error: Column '{new_name}' already exists in table '{table_name}'"
+                # Update schema
+                for col in schema:
+                    if col["name"] == old_name:
+                        col["name"] = new_name
+                        break
+                self.storage.set_schema(table_name, schema)
+                # Update rows
+                rows = self.storage.get_table_data(table_name)
+                for row in rows:
+                    if old_name in row:
+                        row[new_name] = row.pop(old_name)
+                self.storage.set_table_data(table_name, rows)
+                # Update indexes that use this column
+                for idx_name, idx_info in self.storage.data['indexes'].items():
+                    if idx_info["table"] == table_name and idx_info["column"] == old_name:
+                        idx_info["column"] = new_name
+                        # Rebuild index map? Not necessary because values unchanged, just key name.
+                        # But the map keys are values, not column names. The map is unchanged.
+                self.storage.save()
+                logger.info(f"Renamed column '{old_name}' to '{new_name}' in table '{table_name}'")
+                return f"Column '{old_name}' renamed to '{new_name}'"
+            elif operation == "RENAME_TABLE":
+                new_table_name = parsed["new_table_name"]
+                if self.storage.get_schema(new_table_name):
+                    return f"Error: Table '{new_table_name}' already exists"
+                # Rename schema and data
+                self.storage.data["schemas"][new_table_name] = self.storage.data["schemas"].pop(table_name)
+                self.storage.data["tables"][new_table_name] = self.storage.data["tables"].pop(table_name)
+                # Update indexes that reference the table
+                for idx_name, idx_info in self.storage.data['indexes'].items():
+                    if idx_info["table"] == table_name:
+                        idx_info["table"] = new_table_name
+                self.storage.save()
+                logger.info(f"Renamed table '{table_name}' to '{new_table_name}'")
+                return f"Table '{table_name}' renamed to '{new_table_name}'"
+            else:
+                return f"Error: Unknown ALTER TABLE operation '{operation}'"
+        except Exception as e:
+            logger.error(f"ALTER TABLE failed: {e}")
+            return f"Error: {e}"
