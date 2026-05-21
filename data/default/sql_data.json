@@ -24,25 +24,6 @@
         "name": "user_id",
         "type": "INT",
         "constraints": []
-      },
-      {
-        "name": "product",
-        "type": "TEXT",
-        "constraints": []
-      }
-    ],
-    "customers": [
-      {
-        "name": "id",
-        "type": "INT",
-        "constraints": [
-          "PRIMARY KEY"
-        ]
-      },
-      {
-        "name": "name",
-        "type": "TEXT",
-        "constraints": []
       }
     ]
   },
@@ -53,7 +34,24 @@
         "name": "Alice"
       }
     ],
-    "customers": []
+    "orders": [
+      {
+        "id": 1,
+        "user_id": 1
+      }
+    ]
   },
-  "indexes": {}
+  "indexes": {},
+  "foreign_keys": {
+    "users": [],
+    "orders": [
+      {
+        "column": "user_id",
+        "ref_table": "users",
+        "ref_column": "id",
+        "on_delete": "RESTRICT",
+        "on_update": "RESTRICT"
+      }
+    ]
+  }
 }

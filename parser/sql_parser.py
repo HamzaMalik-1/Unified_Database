@@ -11,17 +11,60 @@ class SQLParser:
             raise ValueError("Invalid CREATE TABLE syntax")
         table_name = match.group(1)
         columns_def = match.group(2).strip()
+
         columns = []
-        for col_str in columns_def.split(','):
+        foreign_keys = []
+
+        # Split columns by commas, respecting parentheses
+        col_parts = []
+        current = []
+        paren_depth = 0
+        for ch in columns_def:
+            if ch == '(':
+                paren_depth += 1
+            elif ch == ')':
+                paren_depth -= 1
+            elif ch == ',' and paren_depth == 0:
+                col_parts.append(''.join(current).strip())
+                current = []
+                continue
+            current.append(ch)
+        if current:
+            col_parts.append(''.join(current).strip())
+
+        for col_str in col_parts:
             col_str = col_str.strip()
             if not col_str:
                 continue
-            parts = col_str.split()
-            if len(parts) < 2:
+            # Use a regex that captures column name, type, and the rest
+            # This handles cases where the rest contains REFERENCES and other constraints
+            match_col = re.match(r'^(\w+)\s+(\w+)\s*(.*)$', col_str)
+            if not match_col:
                 raise ValueError(f"Invalid column definition: '{col_str}'")
-            col_name = parts[0]
-            col_type = parts[1].upper()
-            constraints = [c.upper() for c in parts[2:]]
+            col_name = match_col.group(1)
+            col_type = match_col.group(2).upper()
+            rest = match_col.group(3).strip()
+
+            constraints = []
+            ref_table = None
+            ref_col = None
+            on_delete = 'RESTRICT'
+            on_update = 'RESTRICT'
+
+            # Check for REFERENCES ... ( ... )
+            ref_match = re.search(r'REFERENCES\s+(\w+)\s*\(\s*(\w+)\s*\)', rest, re.IGNORECASE)
+            if ref_match:
+                ref_table = ref_match.group(1)
+                ref_col = ref_match.group(2)
+                # Remove the REFERENCES clause from rest to avoid treating it as a constraint
+                rest = re.sub(r'REFERENCES\s+\w+\s*\(\s*\w+\s*\)', '', rest, flags=re.IGNORECASE)
+
+            # Split remaining tokens (constraints)
+            for token in rest.split():
+                token_upper = token.upper()
+                constraints.append(token_upper)
+
+            # Clean up multi-word constraints
             if "PRIMARY" in constraints and "KEY" in constraints:
                 constraints.remove("PRIMARY")
                 constraints.remove("KEY")
@@ -30,12 +73,40 @@ class SQLParser:
                 constraints.remove("NOT")
                 constraints.remove("NULL")
                 constraints.append("NOT NULL")
+
             columns.append({
                 "name": col_name,
                 "type": col_type,
                 "constraints": constraints
             })
-        return {"table_name": table_name, "columns": columns}
+
+            # If this column has an inline foreign key, add it to the foreign_keys list
+            if ref_table and ref_col:
+                foreign_keys.append({
+                    "column": col_name,
+                    "ref_table": ref_table,
+                    "ref_column": ref_col,
+                    "on_delete": on_delete,
+                    "on_update": on_update
+                })
+
+        # Also parse standalone FOREIGN KEY clauses
+        fk_pattern = r"FOREIGN\s+KEY\s*\(\s*(\w+)\s*\)\s+REFERENCES\s+(\w+)\s*\(\s*(\w+)\s*\)(?:\s+ON\s+DELETE\s+(\w+))?(?:\s+ON\s+UPDATE\s+(\w+))?"
+        for match in re.finditer(fk_pattern, columns_def, re.IGNORECASE):
+            col = match.group(1)
+            ref_table = match.group(2)
+            ref_col = match.group(3)
+            on_delete = match.group(4).upper() if match.group(4) else 'RESTRICT'
+            on_update = match.group(5).upper() if match.group(5) else 'RESTRICT'
+            foreign_keys.append({
+                "column": col,
+                "ref_table": ref_table,
+                "ref_column": ref_col,
+                "on_delete": on_delete,
+                "on_update": on_update
+            })
+
+        return {"table_name": table_name, "columns": columns, "foreign_keys": foreign_keys}       
 
     @staticmethod
     def parse_insert(sql: str) -> Dict[str, Any]:
@@ -523,3 +594,34 @@ class SQLParser:
                 "column_def": column_def
             }
         raise ValueError("Invalid ALTER TABLE syntax")
+    
+    
+    @staticmethod
+    def _parse_foreign_key_clause(clause: str) -> Dict[str, Any]:
+        """
+        Parse a FOREIGN KEY clause:
+            FOREIGN KEY (col) REFERENCES parent(pcol) [ON DELETE action] [ON UPDATE action]
+        Returns dict with keys: column, ref_table, ref_column, on_delete, on_update
+        """
+        pattern = r"FOREIGN\s+KEY\s*\(\s*(\w+)\s*\)\s+REFERENCES\s+(\w+)\s*\(\s*(\w+)\s*\)(?:\s+ON\s+DELETE\s+(\w+))?(?:\s+ON\s+UPDATE\s+(\w+))?"
+        match = re.match(pattern, clause, re.IGNORECASE)
+        if not match:
+            raise ValueError("Invalid FOREIGN KEY syntax")
+        col = match.group(1)
+        ref_table = match.group(2)
+        ref_col = match.group(3)
+        on_delete = match.group(4).upper() if match.group(4) else 'RESTRICT'
+        on_update = match.group(5).upper() if match.group(5) else 'RESTRICT'
+        # Validate actions
+        valid_actions = ['CASCADE', 'SET NULL', 'RESTRICT', 'NO ACTION']
+        if on_delete not in valid_actions:
+            raise ValueError(f"Invalid ON DELETE action: {on_delete}")
+        if on_update not in valid_actions:
+            raise ValueError(f"Invalid ON UPDATE action: {on_update}")
+        return {
+            "column": col,
+            "ref_table": ref_table,
+            "ref_column": ref_col,
+            "on_delete": on_delete,
+            "on_update": on_update
+        }

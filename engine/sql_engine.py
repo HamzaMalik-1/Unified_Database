@@ -14,7 +14,9 @@ class SQLDatabase:
         self.storage = storage
         if 'indexes' not in self.storage.data:
             self.storage.data['indexes'] = {}
-            self.storage.save()
+        if 'foreign_keys' not in self.storage.data:
+            self.storage.data['foreign_keys'] = {}
+        self.storage.save()
         self.nosql_engine = None
 
     def set_nosql_engine(self, nosql_engine):
@@ -86,11 +88,14 @@ class SQLDatabase:
             parsed = SQLParser.parse_create_table(sql)
             table_name = parsed["table_name"]
             columns = parsed["columns"]
+            foreign_keys = parsed.get("foreign_keys", [])
             if self.storage.get_schema(table_name):
                 return f"Error: Table '{table_name}' already exists"
             self.storage.set_schema(table_name, columns)
             self.storage.set_table_data(table_name, [])
-            logger.info(f"Table '{table_name}' created with schema: {columns}")
+            self.storage.data['foreign_keys'][table_name] = foreign_keys
+            self.storage.save()
+            logger.info(f"Table '{table_name}' created with {len(foreign_keys)} foreign keys")
             return f"Table '{table_name}' created successfully"
         except Exception as e:
             logger.error(f"CREATE TABLE failed: {e}")
@@ -143,6 +148,10 @@ class SQLDatabase:
                     except ValueError as e:
                         return f"Error: {e}"
                 row[col_name] = typed_val
+            # Check foreign keys BEFORE inserting
+            for col_name, col_val in row.items():
+                if not self._check_parent_exists(table_name, col_name, col_val):
+                    return f"Error: Foreign key violation on {col_name}: value {col_val} not found in parent table"
             existing_rows.append(row)
             self.storage.set_table_data(table_name, existing_rows)
             logger.info(f"Inserted row into '{table_name}': {row}")
@@ -480,39 +489,34 @@ class SQLDatabase:
             table_name = parsed["table"]
             set_assignments = parsed["set"]
             where_cond = parsed["where"]
-
             schema = self.storage.get_schema(table_name)
             if not schema:
                 return f"Error: Table '{table_name}' does not exist"
             rows = self.storage.get_table_data(table_name)
             if not rows:
                 return "Update completed (0 rows affected)"
-
-            # Validate column existence and types
             schema_cols = {col["name"]: col for col in schema}
             for col in set_assignments.keys():
                 if col not in schema_cols:
                     return f"Error: Column '{col}' does not exist in table '{table_name}'"
-
             updated_count = 0
             for row in rows:
-                # Check WHERE condition (if any)
                 if where_cond and not self._evaluate_condition(row, where_cond):
                     continue
-                # Apply updates
+                # For each assignment, check foreign keys before applying update? Simple approach: check after update.
                 for col, val in set_assignments.items():
                     col_def = schema_cols[col]
-                    # Validate data type
                     try:
                         typed_val = DataType.validate(val, col_def["type"]) if val is not None else None
                     except ValueError as e:
                         return f"Error in column '{col}': {e}"
-                    # Check NOT NULL constraint if the column is being updated to NULL
                     if typed_val is None and "NOT NULL" in col_def["constraints"]:
                         return f"Error: Column '{col}' cannot be NULL"
+                    # For foreign key column, check if new value exists in parent
+                    if not self._check_parent_exists(table_name, col, typed_val):
+                        return f"Error: Foreign key violation on {col}: value {typed_val} not found in parent table"
                     row[col] = typed_val
                 updated_count += 1
-            # Persist changes
             self.storage.set_table_data(table_name, rows)
             logger.info(f"Updated {updated_count} row(s) in '{table_name}'")
             return f"Update successful. {updated_count} row(s) affected."
@@ -530,31 +534,81 @@ class SQLDatabase:
             rows = self.storage.get_table_data(table_name)
             if not rows:
                 return "Delete completed (0 rows affected)"
-            if where_cond is None:
-                self.storage.set_table_data(table_name, [])
-                original_count = len(rows)
-                logger.info(f"Deleted all {original_count} row(s) from '{table_name}'")
-                return f"Delete successful. {original_count} row(s) deleted."
-            else:
-                new_rows = []
-                deleted_count = 0
-                for row in rows:
-                    if self._evaluate_condition(row, where_cond):
-                        deleted_count += 1
-                    else:
-                        new_rows.append(row)
-                self.storage.set_table_data(table_name, new_rows)
-                logger.info(f"Deleted {deleted_count} row(s) from '{table_name}'")
-                return f"Delete successful. {deleted_count} row(s) affected."
+            # Before deleting, check foreign key dependencies
+            to_delete = []
+            for row in rows:
+                if where_cond is None or self._evaluate_condition(row, where_cond):
+                    to_delete.append(row)
+            # For each row to delete, check if any child references exist (RESTRICT/NO ACTION)
+            for row in to_delete:
+                for col_name, col_val in row.items():
+                    # Check if this column is referenced by a foreign key with RESTRICT/NO ACTION
+                    for child_table, fk_list in self.storage.data['foreign_keys'].items():
+                        for fk in fk_list:
+                            if fk["ref_table"] == table_name and fk["ref_column"] == col_name:
+                                child_col = fk["column"]
+                                action = fk["on_delete"]
+                                if action in ("RESTRICT", "NO ACTION"):
+                                    child_rows = self.storage.get_table_data(child_table)
+                                    for child_row in child_rows:
+                                        if child_row.get(child_col) == col_val:
+                                            return f"Error: Cannot delete row because child row exists in {child_table}.{child_col}"
+            # Now delete
+            new_rows = [r for r in rows if r not in to_delete]
+            self.storage.set_table_data(table_name, new_rows)
+            # Handle CASCADE / SET NULL after deletion (for child tables)
+            for row in to_delete:
+                for col_name, col_val in row.items():
+                    self._handle_child_references(table_name, col_name, col_val, is_delete=True)
+            self.storage.save()
+            logger.info(f"Deleted {len(to_delete)} row(s) from '{table_name}'")
+            return f"Delete successful. {len(to_delete)} row(s) deleted."
         except Exception as e:
             logger.error(f"DELETE failed: {e}")
             return f"Error: {e}"
+
+    def _check_child_references_before_delete(self, parent_table: str, parent_row: Dict):
+        """Before deleting a parent row, ensure child references are allowed (RESTRICT/NO ACTION)."""
+        for child_table, fk_list in self.storage.data['foreign_keys'].items():
+            for fk in fk_list:
+                if fk["ref_table"] == parent_table:
+                    child_col = fk["column"]
+                    action = fk["on_delete"]
+                    if action in ("RESTRICT", "NO ACTION"):
+                        child_rows = self.storage.get_table_data(child_table)
+                        for child_row in child_rows:
+                            if child_row.get(child_col) == parent_row.get(fk["ref_column"]):
+                                raise Exception(f"Referenced row exists in {child_table}.{child_col}; cannot delete parent")
+
+    def _cascade_delete(self, parent_table: str, parent_row: Dict):
+        """Perform CASCADE or SET NULL on child tables when parent row is deleted."""
+        for child_table, fk_list in self.storage.data['foreign_keys'].items():
+            for fk in fk_list:
+                if fk["ref_table"] == parent_table:
+                    child_col = fk["column"]
+                    action = fk["on_delete"]
+                    if action == "CASCADE":
+                        child_rows = self.storage.get_table_data(child_table)
+                        new_child_rows = []
+                        for child_row in child_rows:
+                            if child_row.get(child_col) != parent_row.get(fk["ref_column"]):
+                                new_child_rows.append(child_row)
+                        self.storage.set_table_data(child_table, new_child_rows)
+                    elif action == "SET NULL":
+                        child_rows = self.storage.get_table_data(child_table)
+                        for child_row in child_rows:
+                            if child_row.get(child_col) == parent_row.get(fk["ref_column"]):
+                                child_row[child_col] = None
+                        self.storage.set_table_data(child_table, child_rows)
 
     def _drop_table(self, sql: str) -> str:
         try:
             table_name = SQLParser.parse_drop_table(sql)
             if not self.storage.get_schema(table_name):
                 return f"Error: Table '{table_name}' does not exist"
+            # Also remove foreign keys referencing this table? For simplicity, we remove the table's own fk definitions.
+            if table_name in self.storage.data['foreign_keys']:
+                del self.storage.data['foreign_keys'][table_name]
             del self.storage.data["schemas"][table_name]
             del self.storage.data["tables"][table_name]
             self.storage.save()
@@ -919,3 +973,51 @@ class SQLDatabase:
         except Exception as e:
             logger.error(f"ALTER TABLE failed: {e}")
             return f"Error: {e}"
+
+    def _check_parent_exists(self, child_table: str, col: str, value: Any) -> bool:
+        """Check if value exists in the referenced parent column."""
+        foreign_keys = self.storage.data['foreign_keys'].get(child_table, [])
+        for fk in foreign_keys:
+            if fk["column"] == col:
+                parent_table = fk["ref_table"]
+                parent_col = fk["ref_column"]
+                parent_rows = self.storage.get_table_data(parent_table)
+                for row in parent_rows:
+                    if row.get(parent_col) == value:
+                        return True
+                return False
+        return True  # no foreign key for this column
+
+    def _handle_child_references(self, parent_table: str, parent_col: str, old_value: Any, new_value: Any = None, is_delete: bool = False):
+        """When parent row is updated or deleted, cascade changes to child tables."""
+        for child_table, fk_list in self.storage.data['foreign_keys'].items():
+            for fk in fk_list:
+                if fk["ref_table"] == parent_table and fk["ref_column"] == parent_col:
+                    child_col = fk["column"]
+                    action = fk["on_delete"] if is_delete else fk["on_update"]
+                    child_rows = self.storage.get_table_data(child_table)
+                    updated = False
+                    if action == "CASCADE":
+                        new_child_rows = []
+                        for row in child_rows:
+                            if row.get(child_col) == old_value:
+                                if not is_delete:
+                                    row[child_col] = new_value
+                                    new_child_rows.append(row)
+                                # else: delete row – do not add
+                            else:
+                                new_child_rows.append(row)
+                        self.storage.set_table_data(child_table, new_child_rows)
+                        updated = True
+                    elif action == "SET NULL":
+                        for row in child_rows:
+                            if row.get(child_col) == old_value:
+                                row[child_col] = None
+                        self.storage.set_table_data(child_table, child_rows)
+                        updated = True
+                    elif action in ("RESTRICT", "NO ACTION"):
+                        for row in child_rows:
+                            if row.get(child_col) == old_value:
+                                raise Exception(f"Referenced row exists in {child_table}.{child_col}")
+                    if updated:
+                        self.storage.save()
