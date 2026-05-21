@@ -420,3 +420,33 @@ class SQLParser:
             sub_sql = match.group(1)
             subqueries.append(("EXISTS", None, sub_sql))
         return subqueries
+    
+    # backend/parser/sql_parser.py (add inside SQLParser class)
+
+    @staticmethod
+    def parse_create_index(sql: str) -> Dict[str, Any]:
+        """
+        Parses: CREATE INDEX index_name ON table_name (column_name)
+        Returns dict: {"index_name": str, "table_name": str, "column": str}
+        """
+        pattern = r"CREATE\s+INDEX\s+(\w+)\s+ON\s+(\w+)\s*\(\s*(\w+)\s*\)"
+        match = re.match(pattern, sql, re.IGNORECASE)
+        if not match:
+            raise ValueError("Invalid CREATE INDEX syntax. Expected: CREATE INDEX idx_name ON table_name (column)")
+        return {
+            "index_name": match.group(1),
+            "table_name": match.group(2),
+            "column": match.group(3)
+        }
+
+    @staticmethod
+    def parse_drop_index(sql: str) -> str:
+        """
+        Parses: DROP INDEX index_name
+        Returns: index_name
+        """
+        pattern = r"DROP\s+INDEX\s+(\w+)"
+        match = re.match(pattern, sql, re.IGNORECASE)
+        if not match:
+            raise ValueError("Invalid DROP INDEX syntax. Expected: DROP INDEX index_name")
+        return match.group(1)

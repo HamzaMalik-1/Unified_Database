@@ -4,7 +4,7 @@ from data_types.data_types import DataType
 from constraints.sql_constraints import SQLConstraint
 from parser.sql_parser import SQLParser
 from loguru import logger
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 import re
 import json
 from utils.response import ResponseFactory, APIResponse
@@ -12,9 +12,12 @@ from utils.response import ResponseFactory, APIResponse
 class SQLDatabase:
     def __init__(self, storage: Storage):
         self.storage = storage
-        self.nosql_engine = None          # <-- ADDED
+        if 'indexes' not in self.storage.data:
+            self.storage.data['indexes'] = {}
+            self.storage.save()
+        self.nosql_engine = None
 
-    def set_nosql_engine(self, nosql_engine):   # <-- ADDED
+    def set_nosql_engine(self, nosql_engine):
         self.nosql_engine = nosql_engine
 
     def execute(self, command: str) -> APIResponse:
@@ -54,6 +57,16 @@ class SQLDatabase:
                 return ResponseFactory.text(result)
             elif cmd_upper.startswith("DROP TABLE"):
                 result = self._drop_table(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
+            elif cmd_upper.startswith("CREATE INDEX"):
+                result = self._create_index(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
+            elif cmd_upper.startswith("DROP INDEX"):
+                result = self._drop_index(command)
                 if result.startswith("Error:"):
                     return ResponseFactory.error(result, status=400)
                 return ResponseFactory.text(result)
@@ -171,7 +184,6 @@ class SQLDatabase:
         return result
 
     def _parse_aggregates(self, columns: List[str]) -> Tuple[List[str], Dict[str, Tuple[str, str]]]:
-        import re
         regular = []
         aggregates = {}
         agg_patterns = {
@@ -222,9 +234,20 @@ class SQLDatabase:
             if not rows:
                 return "[]"
 
+            # ----- Index usage for single‑table equality conditions -----
+            if where_cond and not joins and not group_by:
+                index_info = self._find_index_for_condition(main_table, where_cond)
+                if index_info:
+                    index_name, value = index_info
+                    idx_data = self.storage.data['indexes'][index_name]
+                    row_indices = idx_data["map"].get(value, [])
+                    all_rows = self.storage.get_table_data(main_table)
+                    rows = [all_rows[i] for i in row_indices]
+                    where_cond = None   # Condition already satisfied by index
+            # ------------------------------------------------------------
+
             # ---------- Cross‑model IN subqueries (SQL with NoSQL) ----------
             if where_cond and "NOSQL SELECT" in where_cond.upper() and self.nosql_engine:
-                import re
                 pattern = r"(\w+)\s+IN\s*\(\s*NOSQL\s+(SELECT.+?)\s*\)"
                 match = re.search(pattern, where_cond, re.IGNORECASE | re.DOTALL)
                 if match:
@@ -539,7 +562,6 @@ class SQLDatabase:
     def _handle_subqueries(self, where_cond: str, outer_row: Dict = None) -> Tuple[str, bool]:
         if not where_cond:
             return where_cond, True
-        import re
         in_match = re.search(r"(\w+)\s+IN\s*\(\s*(SELECT .+?)\s*\)", where_cond, re.IGNORECASE | re.DOTALL)
         if in_match:
             column = in_match.group(1)
@@ -576,7 +598,6 @@ class SQLDatabase:
     def _evaluate_join_condition(self, row1: Dict, row2: Dict, condition: str, alias1: str = None, alias2: str = None) -> bool:
         if not condition:
             return True
-        import re
         cond = condition
         for col_name, col_val in row1.items():
             cond = re.sub(rf'\b{col_name}\b', repr(col_val), cond)
@@ -728,3 +749,70 @@ class SQLDatabase:
             return result
         else:
             raise ValueError(f"Unsupported join type: {join_type}")
+        
+        
+    def _create_index(self, sql: str) -> str:
+        try:
+            parsed = SQLParser.parse_create_index(sql)
+            index_name = parsed["index_name"]
+            table_name = parsed["table_name"]
+            column = parsed["column"]
+            schema = self.storage.get_schema(table_name)
+            if not schema:
+                return f"Error: Table '{table_name}' does not exist"
+            column_names = [c["name"] for c in schema]
+            if column not in column_names:
+                return f"Error: Column '{column}' does not exist in table '{table_name}'"
+            if index_name in self.storage.data['indexes']:
+                return f"Error: Index '{index_name}' already exists"
+            rows = self.storage.get_table_data(table_name)
+            index_map = {}
+            for idx, row in enumerate(rows):
+                val = row.get(column)
+                if val is not None:
+                    index_map.setdefault(val, []).append(idx)
+            self.storage.data['indexes'][index_name] = {
+                "table": table_name,
+                "column": column,
+                "map": index_map
+            }
+            self.storage.save()
+            logger.info(f"Created index '{index_name}' on {table_name}({column}) with {len(index_map)} keys")
+            return f"Index '{index_name}' created successfully"
+        except Exception as e:
+            logger.error(f"CREATE INDEX failed: {e}")
+            return f"Error: {e}"
+
+    def _drop_index(self, sql: str) -> str:
+        try:
+            index_name = SQLParser.parse_drop_index(sql)
+            if index_name not in self.storage.data['indexes']:
+                return f"Error: Index '{index_name}' does not exist"
+            del self.storage.data['indexes'][index_name]
+            self.storage.save()
+            logger.info(f"Dropped index '{index_name}'")
+            return f"Index '{index_name}' dropped successfully"
+        except Exception as e:
+            logger.error(f"DROP INDEX failed: {e}")
+            return f"Error: {e}"
+
+    def _find_index_for_condition(self, table: str, condition_str: str) -> Optional[Tuple[str, Any]]:
+        import re
+        match = re.match(r'^\s*(\w+)\s*=\s*(.+)$', condition_str)
+        if not match:
+            return None
+        column = match.group(1)
+        value_str = match.group(2).strip()
+        if value_str.startswith("'") and value_str.endswith("'"):
+            value = value_str[1:-1]
+        elif value_str.isdigit():
+            value = int(value_str)
+        else:
+            try:
+                value = float(value_str)
+            except:
+                value = value_str
+        for idx_name, idx_info in self.storage.data['indexes'].items():
+            if idx_info["table"] == table and idx_info["column"] == column:
+                return (idx_name, value)
+        return None
