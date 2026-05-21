@@ -40,5 +40,6 @@
   },
   "auto_increment": {
     "users": 2
-  }
+  },
+  "views": {}
 }

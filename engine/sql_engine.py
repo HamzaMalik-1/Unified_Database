@@ -20,6 +20,8 @@ class SQLDatabase:
             self.storage.data['check_constraints'] = {}   # <-- FIXED
         if 'auto_increment' not in self.storage.data:
             self.storage.data['auto_increment'] = {}
+        if 'views' not in self.storage.data:
+            self.storage.data['views'] = {}
         self.storage.save()
         self.nosql_engine = None
 
@@ -78,6 +80,16 @@ class SQLDatabase:
                 return ResponseFactory.text(result)
             elif cmd_upper.startswith("ALTER TABLE"):
                 result = self._alter_table(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
+            elif cmd_upper.startswith("CREATE VIEW"):
+                result = self._create_view(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
+            elif cmd_upper.startswith("DROP VIEW"):
+                result = self._drop_view(command)
                 if result.startswith("Error:"):
                     return ResponseFactory.error(result, status=400)
                 return ResponseFactory.text(result)
@@ -272,7 +284,7 @@ class SQLDatabase:
                 regular.append(col)
         return regular, aggregates
 
-    def _select(self, sql: str) -> str:
+    def _select(self, sql: str, depth: int = 0) -> str:
         try:
             parsed = SQLParser.parse_select(sql)
             main_table = parsed.get("main_table", parsed.get("table"))
@@ -284,19 +296,37 @@ class SQLDatabase:
             having_cond = parsed["having"]
             columns_spec = parsed["columns"]
 
-            rows = self.storage.get_table_data(main_table)
-            if not rows:
-                rows = []
-            for join_type, join_table, condition in joins:
-                right_rows = self.storage.get_table_data(join_table)
-                if not right_rows:
-                    right_rows = []
-                rows = self._join_rows(rows, right_rows, join_type, condition)
-            if not rows:
-                return "[]"
+            # ---------- View expansion ----------
+            is_view = False
+            if main_table in self.storage.data.get('views', {}):
+                if depth > 5:
+                    return "Error: View recursion depth exceeded (possible circular reference?)"
+                view_query = self.storage.data['views'][main_table]
+                # Execute the view query recursively
+                view_result_str = self._select(view_query, depth + 1)
+                if view_result_str.startswith("Error:"):
+                    return view_result_str
+                rows = json.loads(view_result_str)
+                is_view = True
+            else:
+                # Check if the table exists
+                if not self.storage.get_schema(main_table):
+                    return f"Error: Table or view '{main_table}' does not exist"
+                # Normal table processing
+                rows = self.storage.get_table_data(main_table)
+                if not rows:
+                    rows = []
+                for join_type, join_table, condition in joins:
+                    right_rows = self.storage.get_table_data(join_table)
+                    if not right_rows:
+                        right_rows = []
+                    rows = self._join_rows(rows, right_rows, join_type, condition)
+                if not rows:
+                    return "[]"
+            # ------------------------------------------------------------
 
-            # ----- Index usage for single‑table equality conditions -----
-            if where_cond and not joins and not group_by:
+            # ----- Index usage (only for single table, no joins, no group by, and not a view) -----
+            if where_cond and not joins and not group_by and not is_view:
                 index_info = self._find_index_for_condition(main_table, where_cond)
                 if index_info:
                     index_name, value = index_info
@@ -304,17 +334,15 @@ class SQLDatabase:
                     row_indices = idx_data["map"].get(value, [])
                     all_rows = self.storage.get_table_data(main_table)
                     rows = [all_rows[i] for i in row_indices]
-                    where_cond = None   # Condition already satisfied by index
-            # ------------------------------------------------------------
+                    where_cond = None
 
-            # ---------- Cross‑model IN subqueries (SQL with NoSQL) ----------
+            # ----- Cross‑model IN subqueries (SQL with NoSQL) -----
             if where_cond and "NOSQL SELECT" in where_cond.upper() and self.nosql_engine:
                 pattern = r"(\w+)\s+IN\s*\(\s*NOSQL\s+(SELECT.+?)\s*\)"
                 match = re.search(pattern, where_cond, re.IGNORECASE | re.DOTALL)
                 if match:
                     outer_column = match.group(1)
                     inner_nosql_sql = match.group(2).strip()
-                    # The inner_nosql_sql already contains the SELECT command without the NOSQL prefix
                     resp = self.nosql_engine.execute(inner_nosql_sql)
                     if not resp.success:
                         return f"Error in cross-model subquery: {resp.message}"
@@ -326,7 +354,6 @@ class SQLDatabase:
                             values = [list(item.values())[0] for item in resp.data.content if item]
                     rows = [r for r in rows if r.get(outer_column) in values]
                     where_cond = None
-            # -----------------------------------------------------------------
 
             # ----- scalar subquery extraction -----
             scalar_subqueries = []
@@ -335,14 +362,14 @@ class SQLDatabase:
                 for col in columns_spec:
                     col = col.strip()
                     if col.startswith('('):
-                        depth = 0
+                        depth_paren = 0
                         end_idx = -1
                         for i, ch in enumerate(col):
                             if ch == '(':
-                                depth += 1
+                                depth_paren += 1
                             elif ch == ')':
-                                depth -= 1
-                                if depth == 0:
+                                depth_paren -= 1
+                                if depth_paren == 0:
                                     end_idx = i
                                     break
                         if end_idx != -1:
@@ -373,7 +400,7 @@ class SQLDatabase:
                     col_list_str = match.group(1).strip()
                     subquery_sql = match.group(2).strip()
                     outer_cols = [c.strip() for c in col_list_str.split(',')]
-                    sub_rows = self._execute_select_to_rows(subquery_sql)
+                    sub_rows = self._execute_select_to_rows(subquery_sql, depth+1)
                     value_tuples = [tuple(r.values()) for r in sub_rows]
                     rows = [r for r in rows if tuple(r.get(c) for c in outer_cols) in value_tuples]
                     where_cond = None
@@ -386,7 +413,7 @@ class SQLDatabase:
                     outer_column = match.group(1)
                     inner_sql = match.group(2).strip()
                     try:
-                        inner_rows = self._execute_select_to_rows(inner_sql)
+                        inner_rows = self._execute_select_to_rows(inner_sql, depth+1)
                         values = []
                         for row in inner_rows:
                             if outer_column in row:
@@ -423,7 +450,7 @@ class SQLDatabase:
                             for col_name, col_val in row.items():
                                 modified_inner = re.sub(rf'{main_table}\.{col_name}', str(col_val), modified_inner, flags=re.IGNORECASE)
                             try:
-                                if self._execute_select_to_rows(modified_inner):
+                                if self._execute_select_to_rows(modified_inner, depth+1):
                                     filtered_rows.append(row)
                             except Exception:
                                 pass
@@ -437,7 +464,7 @@ class SQLDatabase:
             # Attach scalar subquery values
             if scalar_subqueries:
                 for alias, sub_sql in scalar_subqueries:
-                    scalar_val = self._evaluate_scalar_subquery(sub_sql)
+                    scalar_val = self._evaluate_scalar_subquery(sub_sql, depth+1)
                     for row in rows:
                         row[alias] = scalar_val
 
@@ -529,7 +556,8 @@ class SQLDatabase:
         except Exception as e:
             logger.error(f"SELECT failed: {e}")
             return f"Error: {e}"
-
+        
+        
     def _update(self, sql: str) -> str:
         try:
             parsed = SQLParser.parse_update(sql)
@@ -680,14 +708,14 @@ class SQLDatabase:
             logger.error(f"DROP TABLE failed: {e}")
             return f"Error: {e}"
 
-    def _handle_subqueries(self, where_cond: str, outer_row: Dict = None) -> Tuple[str, bool]:
+    def _handle_subqueries(self, where_cond: str, outer_row: Dict = None, depth: int = 0) -> Tuple[str, bool]:
         if not where_cond:
             return where_cond, True
         in_match = re.search(r"(\w+)\s+IN\s*\(\s*(SELECT .+?)\s*\)", where_cond, re.IGNORECASE | re.DOTALL)
         if in_match:
             column = in_match.group(1)
             sub_sql = in_match.group(2)
-            sub_result = self._select(sub_sql)
+            sub_result = self._select(sub_sql, depth+1)
             import json
             try:
                 rows = json.loads(sub_result)
@@ -703,14 +731,14 @@ class SQLDatabase:
                 pass
         return where_cond, True
 
-    def _execute_select_to_rows(self, sql: str) -> List[Dict]:
-        result_str = self._select(sql)
+    def _execute_select_to_rows(self, sql: str, depth: int = 0) -> List[Dict]:
+        result_str = self._select(sql, depth)
         if result_str.startswith("Error:"):
             raise Exception(result_str)
         return json.loads(result_str)
 
-    def _evaluate_scalar_subquery(self, subquery_sql: str) -> Any:
-        rows = self._execute_select_to_rows(subquery_sql)
+    def _evaluate_scalar_subquery(self, subquery_sql: str, depth: int = 0) -> Any:
+        rows = self._execute_select_to_rows(subquery_sql, depth)
         if not rows:
             return None
         row = rows[0]
@@ -1117,3 +1145,32 @@ class SQLDatabase:
             if not self._evaluate_condition(row, expr):
                 return f"Check constraint violated: {expr}"
         return None
+    
+    
+    def _create_view(self, sql: str) -> str:
+        try:
+            parsed = SQLParser.parse_create_view(sql)
+            view_name = parsed["view_name"]
+            view_query = parsed["query"]
+            if view_name in self.storage.data.get('views', {}):
+                return f"Error: View '{view_name}' already exists"
+            self.storage.data['views'][view_name] = view_query
+            self.storage.save()
+            logger.info(f"Created view '{view_name}'")
+            return f"View '{view_name}' created successfully"
+        except Exception as e:
+            logger.error(f"CREATE VIEW failed: {e}")
+            return f"Error: {e}"
+
+    def _drop_view(self, sql: str) -> str:
+        try:
+            view_name = SQLParser.parse_drop_view(sql)
+            if view_name not in self.storage.data.get('views', {}):
+                return f"Error: View '{view_name}' does not exist"
+            del self.storage.data['views'][view_name]
+            self.storage.save()
+            logger.info(f"Dropped view '{view_name}'")
+            return f"View '{view_name}' dropped successfully"
+        except Exception as e:
+            logger.error(f"DROP VIEW failed: {e}")
+            return f"Error: {e}"

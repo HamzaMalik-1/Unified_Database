@@ -63,7 +63,7 @@ class SQLParser:
 
     @staticmethod
     def parse_select(sql: str) -> Dict[str, Any]:
-        """Parse SELECT with support for joins, subqueries, and cross‑model NOSQL subqueries."""
+        """Parse SELECT with support for joins, derived tables, subqueries, and cross‑model NOSQL subqueries."""
         sql = sql.strip()
         # Find the position of the main FROM keyword (not inside parentheses)
         paren_depth = 0
@@ -82,7 +82,6 @@ class SQLParser:
         after_from = sql[from_pos+4:].strip()        # everything after FROM
 
         # --- Find where the FROM clause ends (before WHERE, ORDER, GROUP, LIMIT, HAVING) ---
-        # Scan until we hit one of these keywords (not inside parentheses)
         clause_keywords = ['WHERE', 'ORDER BY', 'GROUP BY', 'LIMIT', 'HAVING']
         clause_positions = {}
         for kw in clause_keywords:
@@ -96,36 +95,78 @@ class SQLParser:
                 elif depth == 0 and after_from[j:j+kw_len].upper() == kw:
                     clause_positions[kw] = j
                     break
-        # Earliest clause start
         from_end = len(after_from)
         if clause_positions:
             from_end = min(clause_positions.values())
         from_clause = after_from[:from_end].strip()
         rest = after_from[from_end:].strip() if from_end < len(after_from) else ""
 
-        # --- Tokenize the FROM clause (respect parentheses for subqueries) ---
+        # --- Parse the FROM clause (supports derived table subqueries) ---
+        # Tokenise the FROM clause, treating parenthesised subqueries as single tokens.
         tokens = []
         current = []
         in_paren = 0
-        for ch in from_clause:
+        i = 0
+        while i < len(from_clause):
+            ch = from_clause[i]
             if ch == '(':
-                in_paren += 1
-            elif ch == ')':
-                in_paren -= 1
+                if in_paren == 0:
+                    # Start of a subquery token
+                    if current:
+                        tokens.append(''.join(current).strip())
+                        current = []
+                    paren_start = i
+                    # Find matching closing parenthesis
+                    depth = 1
+                    j = i+1
+                    while j < len(from_clause) and depth > 0:
+                        if from_clause[j] == '(':
+                            depth += 1
+                        elif from_clause[j] == ')':
+                            depth -= 1
+                        j += 1
+                    subquery = from_clause[paren_start:j].strip()
+                    tokens.append(subquery)
+                    i = j
+                    continue
+                else:
+                    current.append(ch)
+                    i += 1
             elif ch.isspace() and in_paren == 0:
                 if current:
-                    tokens.append(''.join(current))
+                    tokens.append(''.join(current).strip())
                     current = []
-                continue
-            current.append(ch)
+                i += 1
+            else:
+                current.append(ch)
+                i += 1
         if current:
-            tokens.append(''.join(current))
+            tokens.append(''.join(current).strip())
 
+        # Now parse tokens: first table (could be a subquery), then optional ALIAS, then joins
         if not tokens:
             raise ValueError("Invalid FROM clause")
-        main_table = tokens[0]
+        main_table = None
+        # Check if first token is a subquery (starts with '(')
+        if tokens[0].startswith('('):
+            # It's a derived table: (SELECT ...) AS alias
+            subquery_sql = tokens[0]
+            # Look for alias after the subquery
+            if len(tokens) > 1 and tokens[1].upper() == 'AS':
+                if len(tokens) < 3:
+                    raise ValueError("Missing alias after AS")
+                main_table = tokens[2]
+                # Remove the first three tokens
+                tokens = tokens[3:]
+            else:
+                raise ValueError("Derived table requires alias (AS alias)")
+        else:
+            main_table = tokens[0]
+            tokens = tokens[1:]
+
+        # Parse joins (remaining tokens) – the logic is identical to your existing join parsing
         joins = []
-        i = 1
+        i = 0
         while i < len(tokens):
             token = tokens[i].upper()
             if token == 'INNER':
@@ -237,11 +278,10 @@ class SQLParser:
                 condition = ' '.join(condition_parts)
                 joins.append(('INNER', join_table, condition))
             else:
-                # If we encounter something unexpected, it might be part of a subquery inside the FROM clause?
-                # But for cross-model subqueries, the WHERE clause is isolated above.
+                # Unexpected token – could be part of a subquery alias that we missed? For now, raise error.
                 raise ValueError(f"Unexpected token in FROM clause: {token}")
 
-        # --- Parse SELECT columns ---
+        # --- Parse SELECT columns (unchanged) ---
         if select_part == "*":
             columns = "*"
         else:
@@ -269,17 +309,14 @@ class SQLParser:
         group_by = None
         having = None
 
-        # WHERE
         where_match = re.search(r"\bWHERE\s+(.*?)(?:\s+ORDER\s+BY|\s+GROUP\s+BY|\s+LIMIT|$)", rest, re.IGNORECASE | re.DOTALL)
         if where_match:
             where_cond = where_match.group(1).strip()
-        # ORDER BY
         order_match = re.search(r"\bORDER\s+BY\s+(\w+)\s*(ASC|DESC)?", rest, re.IGNORECASE)
         if order_match:
             col = order_match.group(1)
             direction = order_match.group(2).upper() if order_match.group(2) else "ASC"
             order_by = (col, direction)
-        # LIMIT
         limit_match = re.search(r"\bLIMIT\s+(\d+)(?:\s*,\s*(\d+))?", rest, re.IGNORECASE)
         if limit_match:
             if limit_match.group(2) is not None:
@@ -289,11 +326,9 @@ class SQLParser:
             else:
                 limit_val = int(limit_match.group(1))
                 limit = (limit_val, None)
-        # GROUP BY
         group_match = re.search(r"\bGROUP\s+BY\s+(\w+)", rest, re.IGNORECASE)
         if group_match:
             group_by = group_match.group(1)
-        # HAVING
         if group_by:
             having_match = re.search(r"\bHAVING\s+(.*?)(?:\s+ORDER\s+BY|\s+LIMIT|$)", rest, re.IGNORECASE | re.DOTALL)
             if having_match:
@@ -309,7 +344,7 @@ class SQLParser:
             "group_by": group_by,
             "having": having
         }
-
+        
     @staticmethod
     def parse_update(sql: str) -> Dict[str, Any]:
         """
@@ -683,3 +718,20 @@ class SQLParser:
             "on_delete": on_delete,
             "on_update": on_update
         }
+        
+            
+    @staticmethod
+    def parse_create_view(sql: str) -> Dict[str, Any]:
+        pattern = r"CREATE\s+VIEW\s+(\w+)\s+AS\s+(SELECT\s+.+)"
+        match = re.match(pattern, sql, re.IGNORECASE | re.DOTALL)
+        if not match:
+            raise ValueError("Invalid CREATE VIEW syntax")
+        return {"view_name": match.group(1), "query": match.group(2).strip()}
+
+    @staticmethod
+    def parse_drop_view(sql: str) -> str:
+        pattern = r"DROP\s+VIEW\s+(\w+)"
+        match = re.match(pattern, sql, re.IGNORECASE)
+        if not match:
+            raise ValueError("Invalid DROP VIEW syntax")
+        return match.group(1)
