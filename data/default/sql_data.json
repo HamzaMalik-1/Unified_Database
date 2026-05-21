@@ -4,11 +4,9 @@
       {
         "name": "id",
         "type": "INT",
-        "constraints": [
-          "PRIMARY KEY"
-        ],
+        "constraints": [],
         "default": null,
-        "auto_increment": true
+        "auto_increment": false
       },
       {
         "name": "name",
@@ -27,7 +25,7 @@
       },
       {
         "id": 2,
-        "name": "sdd"
+        "name": "Bob"
       }
     ]
   },
@@ -38,8 +36,7 @@
   "check_constraints": {
     "users": []
   },
-  "auto_increment": {
-    "users": 2
-  },
-  "views": {}
+  "auto_increment": {},
+  "views": {},
+  "procedures": {}
 }

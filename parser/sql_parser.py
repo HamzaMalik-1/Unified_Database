@@ -735,3 +735,66 @@ class SQLParser:
         if not match:
             raise ValueError("Invalid DROP VIEW syntax")
         return match.group(1)
+        
+    @staticmethod
+    def parse_create_procedure(sql: str) -> Dict[str, Any]:
+        """
+        Parses: CREATE PROCEDURE name (param1, param2) AS sql_statement
+        Returns dict: {"proc_name": str, "params": list, "body": str}
+        """
+        pattern = r"CREATE\s+PROCEDURE\s+(\w+)\s*\(([^)]*)\)\s+AS\s+(.+)"
+        match = re.match(pattern, sql, re.IGNORECASE | re.DOTALL)
+        if not match:
+            raise ValueError("Invalid CREATE PROCEDURE syntax. Expected: CREATE PROCEDURE name (p1, p2) AS SELECT ...")
+        proc_name = match.group(1)
+        params_str = match.group(2).strip()
+        body = match.group(3).strip()
+        params = [p.strip() for p in params_str.split(',')] if params_str else []
+        return {"proc_name": proc_name, "params": params, "body": body}
+
+    @staticmethod
+    def parse_drop_procedure(sql: str) -> str:
+        """
+        Parses: DROP PROCEDURE proc_name
+        Returns: proc_name
+        """
+        pattern = r"DROP\s+PROCEDURE\s+(\w+)"
+        match = re.match(pattern, sql, re.IGNORECASE)
+        if not match:
+            raise ValueError("Invalid DROP PROCEDURE syntax. Expected: DROP PROCEDURE name")
+        return match.group(1)
+
+    @staticmethod
+    def parse_call(sql: str) -> Dict[str, Any]:
+        """
+        Parses: CALL proc_name(value1, value2)
+        Returns dict: {"proc_name": str, "args": list}
+        """
+        pattern = r"CALL\s+(\w+)\s*\(([^)]*)\)"
+        match = re.match(pattern, sql, re.IGNORECASE)
+        if not match:
+            raise ValueError("Invalid CALL syntax. Expected: CALL name(val1, val2)")
+        proc_name = match.group(1)
+        args_str = match.group(2).strip()
+        args = []
+        if args_str:
+            # Parse arguments (simple comma separation, ignoring inner commas in strings)
+            # For simplicity, we split by comma and strip.
+            # In a full implementation, handle quotes and parentheses.
+            args = [arg.strip() for arg in args_str.split(',')]
+            # Convert values: numbers, strings, NULL
+            cleaned = []
+            for arg in args:
+                if arg.upper() == 'NULL':
+                    cleaned.append(None)
+                elif arg.startswith("'") and arg.endswith("'"):
+                    cleaned.append(arg[1:-1])
+                elif arg.isdigit():
+                    cleaned.append(int(arg))
+                else:
+                    try:
+                        cleaned.append(float(arg))
+                    except:
+                        cleaned.append(arg)
+            args = cleaned
+        return {"proc_name": proc_name, "args": args}

@@ -22,6 +22,8 @@ class SQLDatabase:
             self.storage.data['auto_increment'] = {}
         if 'views' not in self.storage.data:
             self.storage.data['views'] = {}
+        if 'procedures' not in self.storage.data:
+            self.storage.data['procedures'] = {}
         self.storage.save()
         self.nosql_engine = None
 
@@ -93,6 +95,19 @@ class SQLDatabase:
                 if result.startswith("Error:"):
                     return ResponseFactory.error(result, status=400)
                 return ResponseFactory.text(result)
+            
+            elif cmd_upper.startswith("CREATE PROCEDURE"):
+                result = self._create_procedure(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
+            elif cmd_upper.startswith("DROP PROCEDURE"):
+                result = self._drop_procedure(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
+            elif cmd_upper.startswith("CALL"):
+                return self._call_procedure(command)
             else:
                 return ResponseFactory.error(f"Unsupported SQL command: {command}", status=400)
         except Exception as e:
@@ -1174,3 +1189,62 @@ class SQLDatabase:
         except Exception as e:
             logger.error(f"DROP VIEW failed: {e}")
             return f"Error: {e}"
+        
+        
+        
+        
+    def _create_procedure(self, sql: str) -> str:
+        try:
+            parsed = SQLParser.parse_create_procedure(sql)
+            proc_name = parsed["proc_name"]
+            params = parsed["params"]
+            body = parsed["body"]
+            if proc_name in self.storage.data['procedures']:
+                return f"Error: Procedure '{proc_name}' already exists"
+            self.storage.data['procedures'][proc_name] = {"params": params, "body": body}
+            self.storage.save()
+            logger.info(f"Created procedure '{proc_name}'")
+            return f"Procedure '{proc_name}' created successfully"
+        except Exception as e:
+            logger.error(f"CREATE PROCEDURE failed: {e}")
+            return f"Error: {e}"
+
+    def _drop_procedure(self, sql: str) -> str:
+        try:
+            proc_name = SQLParser.parse_drop_procedure(sql)
+            if proc_name not in self.storage.data['procedures']:
+                return f"Error: Procedure '{proc_name}' does not exist"
+            del self.storage.data['procedures'][proc_name]
+            self.storage.save()
+            logger.info(f"Dropped procedure '{proc_name}'")
+            return f"Procedure '{proc_name}' dropped successfully"
+        except Exception as e:
+            logger.error(f"DROP PROCEDURE failed: {e}")
+            return f"Error: {e}"
+
+    def _call_procedure(self, sql: str) -> APIResponse:
+        try:
+            parsed = SQLParser.parse_call(sql)
+            proc_name = parsed["proc_name"]
+            args = parsed["args"]
+            if proc_name not in self.storage.data['procedures']:
+                return ResponseFactory.error(f"Procedure '{proc_name}' does not exist", status=400)
+            proc_def = self.storage.data['procedures'][proc_name]
+            params = proc_def["params"]
+            body = proc_def["body"]
+            if len(args) != len(params):
+                return ResponseFactory.error(f"Procedure '{proc_name}' expects {len(params)} arguments, got {len(args)}", status=400)
+            substituted = body
+            for i, arg in enumerate(args, start=1):
+                if isinstance(arg, str):
+                    arg_repr = f"'{arg}'"
+                elif arg is None:
+                    arg_repr = "NULL"
+                else:
+                    arg_repr = str(arg)
+                substituted = re.sub(rf'\${i}\b', arg_repr, substituted)
+            # Execute the raw SQL command (no prefix)
+            return self.execute(substituted)
+        except Exception as e:
+            logger.error(f"CALL failed: {e}")
+            return ResponseFactory.error(str(e), status=500)
