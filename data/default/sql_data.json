@@ -4,14 +4,18 @@
       {
         "name": "id",
         "type": "INT",
-        "constraints": [],
-        "default": null
+        "constraints": [
+          "PRIMARY KEY"
+        ],
+        "default": null,
+        "auto_increment": true
       },
       {
         "name": "name",
         "type": "TEXT",
         "constraints": [],
-        "default": null
+        "default": null,
+        "auto_increment": false
       }
     ]
   },
@@ -19,19 +23,11 @@
     "users": [
       {
         "id": 1,
-        "name": null
+        "name": "Alice"
       },
       {
         "id": 2,
-        "name": null
-      },
-      {
-        "id": 3,
-        "name": "Guest"
-      },
-      {
-        "id": 22,
-        "name": "'Anonymous'"
+        "name": "sdd"
       }
     ]
   },
@@ -41,5 +37,8 @@
   },
   "check_constraints": {
     "users": []
+  },
+  "auto_increment": {
+    "users": 2
   }
 }

@@ -18,6 +18,8 @@ class SQLDatabase:
             self.storage.data['foreign_keys'] = {}
         if 'check_constraints' not in self.storage.data:
             self.storage.data['check_constraints'] = {}   # <-- FIXED
+        if 'auto_increment' not in self.storage.data:
+            self.storage.data['auto_increment'] = {}
         self.storage.save()
         self.nosql_engine = None
 
@@ -98,6 +100,10 @@ class SQLDatabase:
                 self.storage.set_table_data(table_name, [])
                 self.storage.data['foreign_keys'][table_name] = foreign_keys
                 self.storage.data['check_constraints'][table_name] = checks   # <-- ADDED
+                for col in columns:
+                    if col.get('auto_increment'):
+                        self.storage.data['auto_increment'][table_name] = 0
+                        break
                 self.storage.save()
                 logger.info(f"Table '{table_name}' created with {len(foreign_keys)} foreign keys, {len(checks)} checks")
                 return f"Table '{table_name}' created successfully"
@@ -116,7 +122,6 @@ class SQLDatabase:
                 return f"Error: Table '{table_name}' does not exist"
             existing_rows = self.storage.get_table_data(table_name)
 
-            # Build value dictionary for specified columns
             if not specified_cols:
                 target_cols = [col["name"] for col in schema]
                 if len(raw_values) != len(target_cols):
@@ -136,27 +141,42 @@ class SQLDatabase:
                 col_name = col_def["name"]
                 col_type = col_def["type"]
                 constraints = col_def["constraints"]
-                # Get provided value, if any
                 val = value_dict.get(col_name, None)
-                # Apply default if value is None and default exists
-                if val is None:
-                    default_val = col_def.get("default")
-                    if default_val is not None:
-                        try:
-                            # Convert default value to the column type
-                            typed_val = DataType.validate(default_val, col_type)
-                        except Exception as e:
-                            logger.warning(f"Default value conversion failed for {col_name}: {e}")
-                            typed_val = default_val  # fallback
+
+                # ----- Auto‑increment (highest priority) -----
+                if col_def.get('auto_increment'):
+                    if val is None:
+                        # Generate next value
+                        counter = self.storage.data['auto_increment'].get(table_name, 0) + 1
+                        self.storage.data['auto_increment'][table_name] = counter
+                        typed_val = counter
                     else:
-                        typed_val = None
+                        # User‑supplied value – validate and update counter if larger
+                        try:
+                            user_val = int(val)
+                        except (ValueError, TypeError):
+                            return f"Error: Invalid integer for auto‑increment column '{col_name}'"
+                        current = self.storage.data['auto_increment'].get(table_name, 0)
+                        if user_val > current:
+                            self.storage.data['auto_increment'][table_name] = user_val
+                        typed_val = user_val
+                    # Skip further processing (no DEFAULT, no type validation)
                 else:
-                    # Validate provided value
-                    try:
-                        typed_val = DataType.validate(val, col_type) if val is not None else None
-                    except ValueError as e:
-                        return f"Error in column '{col_name}': {e}"
-                # Check constraints
+                    # ----- Default value (if no value provided) -----
+                    if val is None and col_def.get("default") is not None:
+                        default_val = col_def["default"]
+                        try:
+                            typed_val = DataType.validate(default_val, col_type)
+                        except:
+                            typed_val = default_val
+                    else:
+                        # ----- Normal type validation -----
+                        try:
+                            typed_val = DataType.validate(val, col_type) if val is not None else None
+                        except ValueError as e:
+                            return f"Error in column '{col_name}': {e}"
+
+                # ----- Constraints -----
                 if "NOT NULL" in constraints and typed_val is None:
                     return f"Error: Column '{col_name}' cannot be NULL"
                 if "PRIMARY KEY" in constraints:
@@ -171,7 +191,7 @@ class SQLDatabase:
                         return f"Error: {e}"
                 row[col_name] = typed_val
 
-            # Check CHECK constraints and foreign keys
+            # CHECK constraints and foreign keys (unchanged)
             error = self._check_constraints(table_name, row)
             if error:
                 return error
@@ -185,8 +205,8 @@ class SQLDatabase:
             return "Insert successful"
         except Exception as e:
             logger.error(f"INSERT failed: {e}")
-            return f"Error: {e}"
-        
+            return f"Error: {e}"    
+           
     def _evaluate_condition(self, row: Dict, condition_str: str) -> bool:
         if not condition_str:
             return True
