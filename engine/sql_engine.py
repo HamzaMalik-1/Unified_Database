@@ -1476,3 +1476,47 @@ class SQLDatabase:
             # Convert dict to JSON string (single‑quoted for SQL)
             return f"'{json.dumps(val)}'"
         return f"'{val}'"
+    
+        
+    # ---------- Statistics and Schema ----------
+    def get_stats(self) -> Dict[str, Any]:
+        schemas = self.storage.data.get('schemas', {})
+        tables = self.storage.data.get('tables', {})
+        indexes = self.storage.data.get('indexes', {})
+        views = self.storage.data.get('views', {})
+        procedures = self.storage.data.get('procedures', {})
+        triggers = self.storage.data.get('triggers', [])
+        foreign_keys = self.storage.data.get('foreign_keys', {})
+        check_constraints = self.storage.data.get('check_constraints', {})
+        auto_increment = self.storage.data.get('auto_increment', {})
+
+        table_stats = {}
+        for table_name, rows in tables.items():
+            schema = schemas.get(table_name, [])
+            table_stats[table_name] = {
+                "row_count": len(rows),
+                "indexes": [idx for idx, info in indexes.items() if info.get("table") == table_name],
+                "foreign_keys": len(foreign_keys.get(table_name, [])),
+                "check_constraints": len(check_constraints.get(table_name, [])),
+                "auto_increment_counter": auto_increment.get(table_name),
+                "schema": schema   # full column definitions
+            }
+
+        view_list = list(views.keys())
+        procedure_list = list(procedures.keys())
+        trigger_list = [t["name"] for t in triggers]
+
+        return {
+            "tables": table_stats,
+            "views": view_list,
+            "procedures": procedure_list,
+            "triggers": trigger_list,
+            "total_tables": len(tables),
+            "total_views": len(views),
+            "total_procedures": len(procedures),
+            "total_triggers": len(triggers)
+        }
+
+    def get_schema(self, table_name: str):
+        """Return schema (columns) for a table, or None if table does not exist."""
+        return self.storage.get_schema(table_name)

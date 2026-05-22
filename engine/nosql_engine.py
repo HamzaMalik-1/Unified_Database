@@ -734,3 +734,26 @@ class NoSQLDatabase:
                             inverted.setdefault(word, []).append(idx)
                 idx_info["inverted"] = inverted
         self.storage.save()
+        
+        
+            
+    # ---------- Statistics ----------
+    def get_stats(self) -> Dict[str, Any]:
+        collections = self.storage.data.get('collections', {})
+        indexes = self.storage.data.get('nosql_indexes', {})
+        text_indexes = self.storage.data.get('text_indexes', {})
+
+        collection_stats = {}
+        for coll_name, docs in collections.items():
+            collection_stats[coll_name] = {
+                "document_count": len(docs),
+                "indexes": [idx for idx, info in indexes.items() if info.get("collection") == coll_name],
+                "text_indexes": [idx for idx, info in text_indexes.items() if info.get("collection") == coll_name]
+            }
+
+        return {
+            "collections": collection_stats,
+            "total_collections": len(collections),
+            "total_indexes": len(indexes),
+            "total_text_indexes": len(text_indexes)
+        }

@@ -3,6 +3,7 @@ import time
 from catalog.database_catalog import DatabaseCatalog
 from loguru import logger
 from utils.response import ResponseFactory, APIResponse
+from typing import Dict,Any
 
 class UnifiedDB:
     def __init__(self):
@@ -58,3 +59,17 @@ class UnifiedDB:
             return self.catalog.use_database(name)
         else:
             return "Unknown DATABASE action. Use CREATE or USE."
+        
+            
+    # ---------- Statistics and Schema ----------
+    def get_stats(self) -> Dict[str, Any]:
+        sql_engine = self.catalog.get_current_sql_engine()
+        nosql_engine = self.catalog.get_current_nosql_engine()
+        return {
+            "sql": sql_engine.get_stats(),
+            "nosql": nosql_engine.get_stats()
+        }
+
+    def get_table_schema(self, table_name: str):
+        sql_engine = self.catalog.get_current_sql_engine()
+        return sql_engine.get_schema(table_name)
