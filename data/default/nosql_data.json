@@ -4,14 +4,6 @@
   "collections": {
     "users": [
       {
-        "id": 1,
-        "name": "Alice",
-        "address": {
-          "city": "Boston",
-          "zip": 123
-        }
-      },
-      {
         "id": 2,
         "name": "sd",
         "address": {
@@ -19,7 +11,18 @@
           "zip": 23
         }
       }
+    ],
+    "docs": [
+      {
+        "id": 1,
+        "content": "The quick brown fox jumps over the lazy dog"
+      },
+      {
+        "id": 2,
+        "content": "Fast database engine with full text search"
+      }
     ]
   },
-  "nosql_indexes": {}
+  "nosql_indexes": {},
+  "text_indexes": {}
 }

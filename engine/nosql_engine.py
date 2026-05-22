@@ -14,6 +14,8 @@ class NoSQLDatabase:
             self.storage.data['collections'] = {}
         if 'nosql_indexes' not in self.storage.data:
             self.storage.data['nosql_indexes'] = {}
+        if 'text_indexes' not in self.storage.data:
+            self.storage.data['text_indexes'] = {}
         self.storage.save()
 
     def execute(self, command: str) -> APIResponse:
@@ -36,17 +38,7 @@ class NoSQLDatabase:
                 try:
                     data = json.loads(result_str)
                     if isinstance(data, list):
-                        # Check if any document contains a nested dict
-                        has_nested = False
-                        if data:
-                            for doc in data:
-                                if isinstance(doc, dict):
-                                    for v in doc.values():
-                                        if isinstance(v, dict):
-                                            has_nested = True
-                                            break
-                                if has_nested:
-                                    break
+                        has_nested = any(isinstance(v, dict) for doc in data if isinstance(doc, dict) for v in doc.values())
                         if has_nested:
                             return ResponseFactory.json(data, message="Query executed successfully")
                         else:
@@ -83,6 +75,18 @@ class NoSQLDatabase:
                 if result.startswith("Error:"):
                     return ResponseFactory.error(result, status=400)
                 return ResponseFactory.text(result)
+            # ----- ADD THESE TWO BRANCHES -----
+            elif cmd_upper.startswith("CREATE TEXT INDEX"):
+                result = self._create_text_index(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
+            elif cmd_upper.startswith("DROP TEXT INDEX"):
+                result = self._drop_text_index(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
+            # ---------------------------------
             else:
                 return ResponseFactory.error(f"Unsupported NoSQL command: {command}", status=400)
         except Exception as e:
@@ -108,11 +112,13 @@ class NoSQLDatabase:
             name = NoSQLParser.parse_drop_collection(sql)
             if name not in self.storage.data['collections']:
                 return f"Error: Collection '{name}' does not exist"
-            # Remove all indexes that reference this collection
-            to_del = [idx for idx, info in self.storage.data['nosql_indexes'].items()
-                      if info["collection"] == name]
+            # Remove all indexes
+            to_del = [idx for idx, info in self.storage.data['nosql_indexes'].items() if info["collection"] == name]
             for idx in to_del:
                 del self.storage.data['nosql_indexes'][idx]
+            to_del_text = [idx for idx, info in self.storage.data['text_indexes'].items() if info["collection"] == name]
+            for idx in to_del_text:
+                del self.storage.data['text_indexes'][idx]
             del self.storage.data['collections'][name]
             self.storage.save()
             logger.info(f"Dropped collection '{name}'")
@@ -129,16 +135,28 @@ class NoSQLDatabase:
             doc = parsed["doc"]
             if coll not in self.storage.data['collections']:
                 return f"Error: Collection '{coll}' does not exist. Create it first."
-            # Append document
             self.storage.data['collections'][coll].append(doc)
             new_idx = len(self.storage.data['collections'][coll]) - 1
-            # Update all indexes on this collection with the new document
+
+            # Update equality indexes
             for idx_name, idx_info in self.storage.data['nosql_indexes'].items():
                 if idx_info["collection"] == coll:
                     field = idx_info["field"]
                     val = self._get_nested(doc, field)
                     if val is not None:
                         idx_info["map"].setdefault(val, []).append(new_idx)
+
+            # Update text indexes
+            for idx_name, idx_info in self.storage.data['text_indexes'].items():
+                if idx_info["collection"] == coll:
+                    field = idx_info["field"]
+                    text = self._get_nested(doc, field)
+                    if isinstance(text, str):
+                        words = re.findall(r'\b\w+\b', text.lower())
+                        inverted = idx_info["inverted"]
+                        for word in words:
+                            inverted.setdefault(word, []).append(new_idx)
+
             self.storage.save()
             logger.info(f"Inserted document into '{coll}': {doc}")
             return "Insert successful"
@@ -162,7 +180,6 @@ class NoSQLDatabase:
                 if where is not None:
                     field, operator, value = where
                     left_val = self._get_nested(doc, field)
-                    # Compare
                     if operator == "=" or operator == "==":
                         if not (left_val == value):
                             continue
@@ -185,10 +202,11 @@ class NoSQLDatabase:
                         continue
 
                 # Update document
-                old_doc = doc.copy()  # to compute index changes
+                old_doc = doc.copy()
                 for field, val in set_pairs:
                     self._set_nested(doc, field, val)
-                # Update indexes on this collection for the changed fields
+
+                # Update equality indexes (incremental)
                 for idx_name, idx_info in self.storage.data['nosql_indexes'].items():
                     if idx_info["collection"] == coll:
                         field = idx_info["field"]
@@ -196,16 +214,18 @@ class NoSQLDatabase:
                         new_val = self._get_nested(doc, field)
                         if old_val != new_val:
                             index_map = idx_info["map"]
-                            # Remove old
                             if old_val is not None and old_val in index_map:
                                 if idx in index_map[old_val]:
                                     index_map[old_val].remove(idx)
                                     if not index_map[old_val]:
                                         del index_map[old_val]
-                            # Add new
                             if new_val is not None:
                                 index_map.setdefault(new_val, []).append(idx)
+
                 updated += 1
+
+            # Rebuild text indexes for this collection (simple but correct)
+            self._rebuild_text_indexes_for_collection(coll)
 
             self.storage.save()
             return f"Update successful. {updated} document(s) updated."
@@ -224,10 +244,12 @@ class NoSQLDatabase:
             docs = self.storage.data['collections'][coll]
             if where_field is None:
                 # Delete all documents
-                # Remove all indexes for this collection
                 for idx_name, idx_info in self.storage.data['nosql_indexes'].items():
                     if idx_info["collection"] == coll:
                         idx_info["map"].clear()
+                for idx_name, idx_info in self.storage.data['text_indexes'].items():
+                    if idx_info["collection"] == coll:
+                        idx_info["inverted"].clear()
                 self.storage.data['collections'][coll] = []
                 self.storage.save()
                 return f"Delete successful. {len(docs)} document(s) deleted."
@@ -238,10 +260,12 @@ class NoSQLDatabase:
                     doc_val = self._get_nested(doc, where_field)
                     if doc_val == where_value:
                         to_delete.append(idx)
+
                 # Remove documents
                 new_docs = [doc for i, doc in enumerate(docs) if i not in to_delete]
                 self.storage.data['collections'][coll] = new_docs
-                # Rebuild indexes for this collection (simpler than incremental)
+
+                # Rebuild equality indexes for this collection
                 for idx_name, idx_info in self.storage.data['nosql_indexes'].items():
                     if idx_info["collection"] == coll:
                         field = idx_info["field"]
@@ -251,6 +275,10 @@ class NoSQLDatabase:
                             if val is not None:
                                 new_map.setdefault(val, []).append(new_idx)
                         idx_info["map"] = new_map
+
+                # Rebuild text indexes for this collection
+                self._rebuild_text_indexes_for_collection(coll)
+
                 self.storage.save()
                 return f"Delete successful. {len(to_delete)} document(s) deleted."
         except Exception as e:
@@ -273,28 +301,37 @@ class NoSQLDatabase:
                 return f"Error: Collection '{collection}' does not exist"
             docs = self.storage.data['collections'][collection].copy()
 
-            # ----- Use index if simple equality WHERE and no GROUP BY/aggregates -----
-            use_index = False
-            if where_cond and not group_by:
-                # Check if SELECT list contains aggregate functions
-                has_aggregate = False
-                if columns_spec != "*":
-                    for col in columns_spec:
-                        if re.match(r"COUNT|SUM|AVG|MIN|MAX", col, re.IGNORECASE):
-                            has_aggregate = True
-                            break
-                if not has_aggregate:
-                    index_info = self._find_index_for_condition(collection, where_cond)
-                    if index_info:
-                        idx_name, value = index_info
+            # ----- Determine if SELECT has aggregates -----
+            has_aggregate = False
+            if columns_spec != "*":
+                for col in columns_spec:
+                    if re.match(r"COUNT|SUM|AVG|MIN|MAX", col, re.IGNORECASE):
+                        has_aggregate = True
+                        break
+
+            # ----- Try to use index for WHERE clause (if no GROUP BY and no aggregates) -----
+            if where_cond and not group_by and not has_aggregate:
+                # First check for text index (CONTAINS)
+                text_idx = self._find_text_index_for_condition(collection, where_cond)
+                if text_idx:
+                    idx_name, word = text_idx
+                    idx_data = self.storage.data['text_indexes'][idx_name]
+                    row_indices = idx_data["inverted"].get(word, [])
+                    all_docs = self.storage.data['collections'][collection]
+                    docs = [all_docs[i] for i in row_indices]
+                    where_cond = None
+                else:
+                    # Then try equality index
+                    idx_info = self._find_index_for_condition(collection, where_cond)
+                    if idx_info:
+                        idx_name, value = idx_info
                         idx_data = self.storage.data['nosql_indexes'][idx_name]
                         row_indices = idx_data["map"].get(value, [])
                         all_docs = self.storage.data['collections'][collection]
                         docs = [all_docs[i] for i in row_indices]
-                        where_cond = None   # condition already applied
-            # ---------------------------------------------------------------
+                        where_cond = None
 
-            # Apply WHERE (if any left)
+            # Apply remaining WHERE condition (if any)
             if where_cond:
                 docs = [d for d in docs if self._evaluate_condition(d, where_cond)]
 
@@ -441,7 +478,6 @@ class NoSQLDatabase:
             return None
         field = match.group(1)
         value_str = match.group(2).strip()
-        # Parse value
         if value_str.startswith("'") and value_str.endswith("'"):
             value = value_str[1:-1]
         elif value_str.isdigit():
@@ -456,7 +492,81 @@ class NoSQLDatabase:
                 return (idx_name, value)
         return None
 
-    # ---------- Helper methods (unchanged) ----------
+    # ---------- Text index ----------
+    def _create_text_index(self, sql: str) -> str:
+        try:
+            parsed = NoSQLParser.parse_create_text_index(sql)
+            idx_name = parsed["index_name"]
+            collection = parsed["collection"]
+            field = parsed["field"]
+            if collection not in self.storage.data['collections']:
+                return f"Error: Collection '{collection}' does not exist"
+            if idx_name in self.storage.data['text_indexes']:
+                return f"Error: Text index '{idx_name}' already exists"
+            docs = self.storage.data['collections'][collection]
+            inverted = {}
+            for idx, doc in enumerate(docs):
+                text = self._get_nested(doc, field)
+                if isinstance(text, str):
+                    words = re.findall(r'\b\w+\b', text.lower())
+                    for word in words:
+                        inverted.setdefault(word, []).append(idx)
+            self.storage.data['text_indexes'][idx_name] = {
+                "collection": collection,
+                "field": field,
+                "inverted": inverted
+            }
+            self.storage.save()
+            logger.info(f"Created text index '{idx_name}' on {collection}({field})")
+            return f"Text index '{idx_name}' created successfully"
+        except Exception as e:
+            logger.error(f"CREATE TEXT INDEX failed: {e}")
+            return f"Error: {e}"
+
+    def _drop_text_index(self, sql: str) -> str:
+        try:
+            idx_name = NoSQLParser.parse_drop_text_index(sql)
+            if idx_name not in self.storage.data['text_indexes']:
+                return f"Error: Text index '{idx_name}' does not exist"
+            del self.storage.data['text_indexes'][idx_name]
+            self.storage.save()
+            logger.info(f"Dropped text index '{idx_name}'")
+            return f"Text index '{idx_name}' dropped successfully"
+        except Exception as e:
+            logger.error(f"DROP TEXT INDEX failed: {e}")
+            return f"Error: {e}"
+
+    def _find_text_index_for_condition(self, collection: str, condition_str: str) -> Optional[Tuple[str, str]]:
+        match = re.match(r'^\s*([\w.]+)\s+CONTAINS\s+(.+)$', condition_str, re.IGNORECASE)
+        if not match:
+            return None
+        field = match.group(1)
+        word_str = match.group(2).strip()
+        if word_str.startswith("'") and word_str.endswith("'"):
+            word = word_str[1:-1].lower()
+        else:
+            word = word_str.lower()
+        for idx_name, idx_info in self.storage.data['text_indexes'].items():
+            if idx_info["collection"] == collection and idx_info["field"] == field:
+                return (idx_name, word)
+        return None
+
+    def _rebuild_text_indexes_for_collection(self, collection: str):
+        for idx_name, idx_info in self.storage.data['text_indexes'].items():
+            if idx_info["collection"] == collection:
+                field = idx_info["field"]
+                docs = self.storage.data['collections'][collection]
+                inverted = {}
+                for idx, doc in enumerate(docs):
+                    text = self._get_nested(doc, field)
+                    if isinstance(text, str):
+                        words = re.findall(r'\b\w+\b', text.lower())
+                        for word in words:
+                            inverted.setdefault(word, []).append(idx)
+                idx_info["inverted"] = inverted
+        self.storage.save()
+
+    # ---------- Helper methods ----------
     def _get_nested(self, doc: Dict, path: str) -> Any:
         parts = path.split('.')
         current = doc
@@ -480,6 +590,21 @@ class NoSQLDatabase:
         if not condition_str:
             return True
         cond = condition_str.strip()
+        # First, try to match CONTAINS operator
+        contains_match = re.match(r'^([\w.]+)\s+CONTAINS\s+(.+)$', cond, re.IGNORECASE)
+        if contains_match:
+            field = contains_match.group(1).strip()
+            right_raw = contains_match.group(2).strip()
+            if right_raw.startswith("'") and right_raw.endswith("'"):
+                right_val = right_raw[1:-1].lower()
+            else:
+                right_val = right_raw.lower()
+            left_val = self._get_nested(doc, field)
+            if not isinstance(left_val, str):
+                return False
+            return right_val in left_val.lower()
+
+        # Then handle standard operators
         match = re.match(r'^([\w.]+)\s*([=<>!]+)\s*(.+)$', cond)
         if not match:
             return False
