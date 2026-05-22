@@ -1,5 +1,25 @@
 {
   "schemas": {},
   "tables": {},
-  "collections": {}
+  "collections": {
+    "users": [
+      {
+        "id": 1,
+        "name": "Alice",
+        "address": {
+          "city": "Boston",
+          "zip": 123
+        }
+      },
+      {
+        "id": 2,
+        "name": "sd",
+        "address": {
+          "city": "cc",
+          "zip": 23
+        }
+      }
+    ]
+  },
+  "nosql_indexes": {}
 }

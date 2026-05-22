@@ -1,8 +1,10 @@
+# backend/engine/nosql_engine.py
 from storage.storage import Storage
 from parser.nosql_parser import NoSQLParser
 from loguru import logger
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 import json
+import re
 from utils.response import ResponseFactory, APIResponse
 
 class NoSQLDatabase:
@@ -10,7 +12,9 @@ class NoSQLDatabase:
         self.storage = storage
         if 'collections' not in self.storage.data:
             self.storage.data['collections'] = {}
-            self.storage.save()
+        if 'nosql_indexes' not in self.storage.data:
+            self.storage.data['nosql_indexes'] = {}
+        self.storage.save()
 
     def execute(self, command: str) -> APIResponse:
         cmd_upper = command.strip().upper()
@@ -32,10 +36,24 @@ class NoSQLDatabase:
                 try:
                     data = json.loads(result_str)
                     if isinstance(data, list):
-                        if data and all(isinstance(item, dict) for item in data):
-                            return ResponseFactory.table(data, message="Query executed successfully")
-                        else:
+                        # Check if any document contains a nested dict
+                        has_nested = False
+                        if data:
+                            for doc in data:
+                                if isinstance(doc, dict):
+                                    for v in doc.values():
+                                        if isinstance(v, dict):
+                                            has_nested = True
+                                            break
+                                if has_nested:
+                                    break
+                        if has_nested:
                             return ResponseFactory.json(data, message="Query executed successfully")
+                        else:
+                            if data and all(isinstance(item, dict) for item in data):
+                                return ResponseFactory.table(data, message="Query executed successfully")
+                            else:
+                                return ResponseFactory.json(data, message="Query executed successfully")
                     else:
                         return ResponseFactory.json(data, message="Query executed successfully")
                 except Exception:
@@ -55,12 +73,23 @@ class NoSQLDatabase:
                 if result.startswith("Error:"):
                     return ResponseFactory.error(result, status=400)
                 return ResponseFactory.text(result)
+            elif cmd_upper.startswith("CREATE INDEX"):
+                result = self._create_index(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
+            elif cmd_upper.startswith("DROP INDEX"):
+                result = self._drop_index(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
             else:
                 return ResponseFactory.error(f"Unsupported NoSQL command: {command}", status=400)
         except Exception as e:
             logger.error(f"NoSQL execution failed: {e}")
             return ResponseFactory.error(str(e), status=500)
 
+    # ---------- Collection management ----------
     def _create_collection(self, sql: str) -> str:
         try:
             name = NoSQLParser.parse_create_collection(sql)
@@ -74,6 +103,25 @@ class NoSQLDatabase:
             logger.error(f"CREATE COLLECTION failed: {e}")
             return f"Error: {e}"
 
+    def _drop_collection(self, sql: str) -> str:
+        try:
+            name = NoSQLParser.parse_drop_collection(sql)
+            if name not in self.storage.data['collections']:
+                return f"Error: Collection '{name}' does not exist"
+            # Remove all indexes that reference this collection
+            to_del = [idx for idx, info in self.storage.data['nosql_indexes'].items()
+                      if info["collection"] == name]
+            for idx in to_del:
+                del self.storage.data['nosql_indexes'][idx]
+            del self.storage.data['collections'][name]
+            self.storage.save()
+            logger.info(f"Dropped collection '{name}'")
+            return f"Collection '{name}' dropped successfully"
+        except Exception as e:
+            logger.error(f"DROP COLLECTION failed: {e}")
+            return f"Error: {e}"
+
+    # ---------- CRUD operations with index maintenance ----------
     def _insert(self, sql: str) -> str:
         try:
             parsed = NoSQLParser.parse_insert(sql)
@@ -81,7 +129,16 @@ class NoSQLDatabase:
             doc = parsed["doc"]
             if coll not in self.storage.data['collections']:
                 return f"Error: Collection '{coll}' does not exist. Create it first."
+            # Append document
             self.storage.data['collections'][coll].append(doc)
+            new_idx = len(self.storage.data['collections'][coll]) - 1
+            # Update all indexes on this collection with the new document
+            for idx_name, idx_info in self.storage.data['nosql_indexes'].items():
+                if idx_info["collection"] == coll:
+                    field = idx_info["field"]
+                    val = self._get_nested(doc, field)
+                    if val is not None:
+                        idx_info["map"].setdefault(val, []).append(new_idx)
             self.storage.save()
             logger.info(f"Inserted document into '{coll}': {doc}")
             return "Insert successful"
@@ -89,145 +146,7 @@ class NoSQLDatabase:
             logger.error(f"INSERT failed: {e}")
             return f"Error: {e}"
 
-    def _select(self, sql: str) -> str:
-        try:
-            parsed = NoSQLParser.parse_select(sql)
-            collection = parsed["collection"]
-            columns_spec = parsed["columns"]
-            where_cond = parsed["where"]
-            order_by = parsed["order_by"]
-            limit = parsed["limit"]
-            group_by = parsed["group_by"]
-            having_cond = parsed["having"]
-
-            if collection not in self.storage.data['collections']:
-                return f"Error: Collection '{collection}' does not exist"
-            docs = self.storage.data['collections'][collection].copy()
-
-            # Apply WHERE
-            if where_cond:
-                docs = [d for d in docs if self._evaluate_condition(d, where_cond)]
-
-            # GROUP BY + aggregates
-            if group_by:
-                # Determine aggregates and regular fields
-                if columns_spec == "*":
-                    # For SELECT *, we treat all fields as regular (no aggregates)
-                    # But with GROUP BY, we need to pick one representative per group? Better to require explicit aggregates.
-                    regular_fields = []
-                    agg_specs = {}
-                else:
-                    regular_fields, agg_specs = self._prepare_aggregates(columns_spec)
-
-                # Group documents by group_by field (dot notation supported)
-                groups = {}
-                for doc in docs:
-                    key = self._get_nested(doc, group_by)
-                    if key not in groups:
-                        groups[key] = []
-                    groups[key].append(doc)
-
-                result_docs = []
-                for key, group_docs in groups.items():
-                    row = {group_by: key}
-                    # For regular fields, take the first non-null value (arbitrary)
-                    for f in regular_fields:
-                        val = None
-                        for d in group_docs:
-                            val = self._get_nested(d, f)
-                            if val is not None:
-                                break
-                        row[f] = val
-                    # Compute aggregates
-                    for alias, (func, src_field) in agg_specs.items():
-                        if src_field == "count":
-                            values = [1] * len(group_docs)
-                        else:
-                            values = [self._get_nested(d, src_field) for d in group_docs if self._get_nested(d, src_field) is not None]
-                        if func == "COUNT":
-                            result = len(group_docs)
-                        elif func == "SUM":
-                            result = sum(values) if values else 0
-                        elif func == "AVG":
-                            result = sum(values) / len(values) if values else 0
-                        elif func == "MIN":
-                            result = min(values) if values else None
-                        elif func == "MAX":
-                            result = max(values) if values else None
-                        row[alias] = result
-                    result_docs.append(row)
-                docs = result_docs
-
-                # Apply HAVING
-                if having_cond:
-                    docs = [d for d in docs if self._evaluate_condition(d, having_cond)]
-
-            else:
-                # No GROUP BY – if aggregates are present, compute over all docs
-                if columns_spec != "*":
-                    regular_fields, agg_specs = self._prepare_aggregates(columns_spec)
-                    if agg_specs:
-                        # Single document result
-                        row = {}
-                        for alias, (func, src_field) in agg_specs.items():
-                            if src_field == "count":
-                                values = [1] * len(docs)
-                            else:
-                                values = [self._get_nested(d, src_field) for d in docs if self._get_nested(d, src_field) is not None]
-                            if func == "COUNT":
-                                row[alias] = len(docs)
-                            elif func == "SUM":
-                                row[alias] = sum(values) if values else 0
-                            elif func == "AVG":
-                                row[alias] = sum(values) / len(values) if values else 0
-                            elif func == "MIN":
-                                row[alias] = min(values) if values else None
-                            elif func == "MAX":
-                                row[alias] = max(values) if values else None
-                        # For regular fields, we cannot include them without GROUP BY – ignore
-                        docs = [row]
-                    else:
-                        # No aggregates, just select specific fields later
-                        pass
-
-            # Apply ORDER BY (after grouping and before limit)
-            if order_by:
-                field, direction = order_by
-                reverse = (direction.upper() == "DESC")
-                docs.sort(key=lambda d: self._get_nested(d, field), reverse=reverse)
-
-            # Apply LIMIT
-            if limit:
-                limit_val, offset = limit
-                start = offset if offset is not None else 0
-                docs = docs[start:start+limit_val]
-
-            # Select specific columns (if not already handled by grouping/aggregates)
-            if columns_spec != "*" and not group_by and not agg_specs:
-                # Project only specified fields
-                selected = []
-                for doc in docs:
-                    new_doc = {}
-                    for col in columns_spec:
-                        new_doc[col] = self._get_nested(doc, col)
-                    selected.append(new_doc)
-                docs = selected
-            elif columns_spec != "*" and group_by:
-                # Already built result rows (they have the aliased columns)
-                # No further projection needed
-                pass
-            elif columns_spec == "*":
-                # Keep all fields
-                pass
-
-            return json.dumps(docs, indent=2, default=str)
-
-        except Exception as e:
-            logger.error(f"NoSQL SELECT failed: {e}")
-            return f"Error: {e}"
-
     def _update(self, sql: str) -> str:
-        """Handles UPDATE collection SET field = value, ... [WHERE condition]"""
         try:
             parsed = NoSQLParser.parse_update(sql)
             coll = parsed["collection"]
@@ -238,12 +157,12 @@ class NoSQLDatabase:
                 return f"Error: Collection '{coll}' does not exist"
             docs = self.storage.data['collections'][coll]
             updated = 0
-            for doc in docs:
-                # Check WHERE condition
+            for idx, doc in enumerate(docs):
+                # Evaluate WHERE condition
                 if where is not None:
                     field, operator, value = where
                     left_val = self._get_nested(doc, field)
-                    # Evaluate condition
+                    # Compare
                     if operator == "=" or operator == "==":
                         if not (left_val == value):
                             continue
@@ -264,10 +183,30 @@ class NoSQLDatabase:
                             continue
                     else:
                         continue
-                # Apply SET assignments
+
+                # Update document
+                old_doc = doc.copy()  # to compute index changes
                 for field, val in set_pairs:
                     self._set_nested(doc, field, val)
+                # Update indexes on this collection for the changed fields
+                for idx_name, idx_info in self.storage.data['nosql_indexes'].items():
+                    if idx_info["collection"] == coll:
+                        field = idx_info["field"]
+                        old_val = self._get_nested(old_doc, field)
+                        new_val = self._get_nested(doc, field)
+                        if old_val != new_val:
+                            index_map = idx_info["map"]
+                            # Remove old
+                            if old_val is not None and old_val in index_map:
+                                if idx in index_map[old_val]:
+                                    index_map[old_val].remove(idx)
+                                    if not index_map[old_val]:
+                                        del index_map[old_val]
+                            # Add new
+                            if new_val is not None:
+                                index_map.setdefault(new_val, []).append(idx)
                 updated += 1
+
             self.storage.save()
             return f"Update successful. {updated} document(s) updated."
         except Exception as e:
@@ -285,30 +224,240 @@ class NoSQLDatabase:
             docs = self.storage.data['collections'][coll]
             if where_field is None:
                 # Delete all documents
-                count = len(docs)
+                # Remove all indexes for this collection
+                for idx_name, idx_info in self.storage.data['nosql_indexes'].items():
+                    if idx_info["collection"] == coll:
+                        idx_info["map"].clear()
                 self.storage.data['collections'][coll] = []
                 self.storage.save()
-                return f"Delete successful. {count} document(s) deleted."
+                return f"Delete successful. {len(docs)} document(s) deleted."
             else:
-                # Delete matching documents
-                new_docs = []
-                deleted = 0
-                for doc in docs:
+                # Find indices to delete
+                to_delete = []
+                for idx, doc in enumerate(docs):
                     doc_val = self._get_nested(doc, where_field)
                     if doc_val == where_value:
-                        deleted += 1
-                    else:
-                        new_docs.append(doc)
+                        to_delete.append(idx)
+                # Remove documents
+                new_docs = [doc for i, doc in enumerate(docs) if i not in to_delete]
                 self.storage.data['collections'][coll] = new_docs
+                # Rebuild indexes for this collection (simpler than incremental)
+                for idx_name, idx_info in self.storage.data['nosql_indexes'].items():
+                    if idx_info["collection"] == coll:
+                        field = idx_info["field"]
+                        new_map = {}
+                        for new_idx, doc in enumerate(new_docs):
+                            val = self._get_nested(doc, field)
+                            if val is not None:
+                                new_map.setdefault(val, []).append(new_idx)
+                        idx_info["map"] = new_map
                 self.storage.save()
-                return f"Delete successful. {deleted} document(s) deleted."
+                return f"Delete successful. {len(to_delete)} document(s) deleted."
         except Exception as e:
             logger.error(f"DELETE failed: {e}")
             return f"Error: {e}"
 
-    # Helper functions for nested field access
+    # ---------- SELECT with index usage ----------
+    def _select(self, sql: str) -> str:
+        try:
+            parsed = NoSQLParser.parse_select(sql)
+            collection = parsed["collection"]
+            columns_spec = parsed["columns"]
+            where_cond = parsed["where"]
+            order_by = parsed["order_by"]
+            limit = parsed["limit"]
+            group_by = parsed["group_by"]
+            having_cond = parsed["having"]
+
+            if collection not in self.storage.data['collections']:
+                return f"Error: Collection '{collection}' does not exist"
+            docs = self.storage.data['collections'][collection].copy()
+
+            # ----- Use index if simple equality WHERE and no GROUP BY/aggregates -----
+            use_index = False
+            if where_cond and not group_by:
+                # Check if SELECT list contains aggregate functions
+                has_aggregate = False
+                if columns_spec != "*":
+                    for col in columns_spec:
+                        if re.match(r"COUNT|SUM|AVG|MIN|MAX", col, re.IGNORECASE):
+                            has_aggregate = True
+                            break
+                if not has_aggregate:
+                    index_info = self._find_index_for_condition(collection, where_cond)
+                    if index_info:
+                        idx_name, value = index_info
+                        idx_data = self.storage.data['nosql_indexes'][idx_name]
+                        row_indices = idx_data["map"].get(value, [])
+                        all_docs = self.storage.data['collections'][collection]
+                        docs = [all_docs[i] for i in row_indices]
+                        where_cond = None   # condition already applied
+            # ---------------------------------------------------------------
+
+            # Apply WHERE (if any left)
+            if where_cond:
+                docs = [d for d in docs if self._evaluate_condition(d, where_cond)]
+
+            # GROUP BY + aggregates
+            if group_by:
+                if columns_spec == "*":
+                    regular_fields = []
+                    agg_specs = {}
+                else:
+                    regular_fields, agg_specs = self._prepare_aggregates(columns_spec)
+
+                groups = {}
+                for doc in docs:
+                    key = self._get_nested(doc, group_by)
+                    if key not in groups:
+                        groups[key] = []
+                    groups[key].append(doc)
+
+                result_docs = []
+                for key, group_docs in groups.items():
+                    row = {group_by: key}
+                    for f in regular_fields:
+                        val = None
+                        for d in group_docs:
+                            val = self._get_nested(d, f)
+                            if val is not None:
+                                break
+                        row[f] = val
+                    for alias, (func, src_field) in agg_specs.items():
+                        if src_field == "count":
+                            values = [1] * len(group_docs)
+                        else:
+                            values = [self._get_nested(d, src_field) for d in group_docs if self._get_nested(d, src_field) is not None]
+                        if func == "COUNT":
+                            result = len(group_docs)
+                        elif func == "SUM":
+                            result = sum(values) if values else 0
+                        elif func == "AVG":
+                            result = sum(values) / len(values) if values else 0
+                        elif func == "MIN":
+                            result = min(values) if values else None
+                        elif func == "MAX":
+                            result = max(values) if values else None
+                        row[alias] = result
+                    result_docs.append(row)
+                docs = result_docs
+                if having_cond:
+                    docs = [d for d in docs if self._evaluate_condition(d, having_cond)]
+            else:
+                if columns_spec != "*":
+                    regular_fields, agg_specs = self._prepare_aggregates(columns_spec)
+                    if agg_specs:
+                        row = {}
+                        for alias, (func, src_field) in agg_specs.items():
+                            if src_field == "count":
+                                values = [1] * len(docs)
+                            else:
+                                values = [self._get_nested(d, src_field) for d in docs if self._get_nested(d, src_field) is not None]
+                            if func == "COUNT":
+                                row[alias] = len(docs)
+                            elif func == "SUM":
+                                row[alias] = sum(values) if values else 0
+                            elif func == "AVG":
+                                row[alias] = sum(values) / len(values) if values else 0
+                            elif func == "MIN":
+                                row[alias] = min(values) if values else None
+                            elif func == "MAX":
+                                row[alias] = max(values) if values else None
+                        docs = [row]
+
+            # ORDER BY
+            if order_by:
+                field, direction = order_by
+                reverse = (direction.upper() == "DESC")
+                docs.sort(key=lambda d: self._get_nested(d, field), reverse=reverse)
+
+            # LIMIT
+            if limit:
+                limit_val, offset = limit
+                start = offset if offset is not None else 0
+                docs = docs[start:start+limit_val]
+
+            # Project specific columns
+            if columns_spec != "*" and not group_by and not agg_specs:
+                selected = []
+                for doc in docs:
+                    new_doc = {}
+                    for col in columns_spec:
+                        new_doc[col] = self._get_nested(doc, col)
+                    selected.append(new_doc)
+                docs = selected
+
+            return json.dumps(docs, indent=2, default=str)
+
+        except Exception as e:
+            logger.error(f"NoSQL SELECT failed: {e}")
+            return f"Error: {e}"
+
+    # ---------- Index management ----------
+    def _create_index(self, sql: str) -> str:
+        try:
+            parsed = NoSQLParser.parse_create_index(sql)
+            idx_name = parsed["index_name"]
+            collection = parsed["collection"]
+            field = parsed["field"]
+            if collection not in self.storage.data['collections']:
+                return f"Error: Collection '{collection}' does not exist"
+            if idx_name in self.storage.data['nosql_indexes']:
+                return f"Error: Index '{idx_name}' already exists"
+            docs = self.storage.data['collections'][collection]
+            index_map = {}
+            for idx, doc in enumerate(docs):
+                val = self._get_nested(doc, field)
+                if val is not None:
+                    index_map.setdefault(val, []).append(idx)
+            self.storage.data['nosql_indexes'][idx_name] = {
+                "collection": collection,
+                "field": field,
+                "map": index_map
+            }
+            self.storage.save()
+            logger.info(f"Created NoSQL index '{idx_name}' on {collection}({field})")
+            return f"Index '{idx_name}' created successfully"
+        except Exception as e:
+            logger.error(f"CREATE INDEX failed: {e}")
+            return f"Error: {e}"
+
+    def _drop_index(self, sql: str) -> str:
+        try:
+            idx_name = NoSQLParser.parse_drop_index(sql)
+            if idx_name not in self.storage.data['nosql_indexes']:
+                return f"Error: Index '{idx_name}' does not exist"
+            del self.storage.data['nosql_indexes'][idx_name]
+            self.storage.save()
+            logger.info(f"Dropped NoSQL index '{idx_name}'")
+            return f"Index '{idx_name}' dropped successfully"
+        except Exception as e:
+            logger.error(f"DROP INDEX failed: {e}")
+            return f"Error: {e}"
+
+    def _find_index_for_condition(self, collection: str, condition_str: str) -> Optional[Tuple[str, Any]]:
+        match = re.match(r'^\s*([\w.]+)\s*=\s*(.+)$', condition_str)
+        if not match:
+            return None
+        field = match.group(1)
+        value_str = match.group(2).strip()
+        # Parse value
+        if value_str.startswith("'") and value_str.endswith("'"):
+            value = value_str[1:-1]
+        elif value_str.isdigit():
+            value = int(value_str)
+        else:
+            try:
+                value = float(value_str)
+            except:
+                value = value_str
+        for idx_name, idx_info in self.storage.data['nosql_indexes'].items():
+            if idx_info["collection"] == collection and idx_info["field"] == field:
+                return (idx_name, value)
+        return None
+
+    # ---------- Helper methods (unchanged) ----------
     def _get_nested(self, doc: Dict, path: str) -> Any:
-        """Retrieve value from nested dict using dot notation, e.g., 'address.city'"""
         parts = path.split('.')
         current = doc
         for p in parts:
@@ -319,7 +468,6 @@ class NoSQLDatabase:
         return current
 
     def _set_nested(self, doc: Dict, path: str, value: Any) -> None:
-        """Set value in nested dict using dot notation, creating intermediate dicts as needed."""
         parts = path.split('.')
         current = doc
         for i, p in enumerate(parts[:-1]):
@@ -327,30 +475,17 @@ class NoSQLDatabase:
                 current[p] = {}
             current = current[p]
         current[parts[-1]] = value
-        
+
     def _evaluate_condition(self, doc: Dict, condition_str: str) -> bool:
-        """
-        Evaluate simple WHERE condition like:
-            address.city = 'New York'
-            age > 25
-            name = 'Alice'
-        Supports =, >, <, >=, <=, !=
-        """
         if not condition_str:
             return True
         cond = condition_str.strip()
-        # Split into left part, operator, right part
-        import re
-        # Match patterns: field op value (op can be =, !=, >, <, >=, <=)
         match = re.match(r'^([\w.]+)\s*([=<>!]+)\s*(.+)$', cond)
         if not match:
-            # Fallback to eval (maybe complex condition with AND/OR) but we don't support for now
             return False
         field = match.group(1).strip()
         operator = match.group(2).strip()
         right_raw = match.group(3).strip()
-
-        # Parse right value (strip quotes, convert numbers)
         if right_raw.startswith("'") and right_raw.endswith("'"):
             right_val = right_raw[1:-1]
         elif right_raw.isdigit():
@@ -360,11 +495,7 @@ class NoSQLDatabase:
                 right_val = float(right_raw)
             except:
                 right_val = right_raw
-
-        # Get left value from document using nested access
         left_val = self._get_nested(doc, field)
-
-        # Compare based on operator
         if operator == "=" or operator == "==":
             return left_val == right_val
         elif operator == "!=":
@@ -381,12 +512,6 @@ class NoSQLDatabase:
             return False
 
     def _prepare_aggregates(self, columns: List[str]) -> Tuple[List[str], Dict[str, Tuple[str, str]]]:
-        """
-        Parse column list, detect aggregates.
-        Returns (regular_columns, aggregate_specs)
-        aggregate_specs: {alias: (function, source_field)}
-        """
-        import re
         regular = []
         aggregates = {}
         agg_patterns = {
@@ -413,26 +538,3 @@ class NoSQLDatabase:
             if not matched:
                 regular.append(col)
         return regular, aggregates
-    def _flatten_dict(self, d: Dict, parent_key: str = '', sep: str = '.') -> Dict:
-        """Convert nested dict into flat dict with dot‑notation keys."""
-        items = []
-        for k, v in d.items():
-            new_key = f"{parent_key}{sep}{k}" if parent_key else k
-            if isinstance(v, dict):
-                items.extend(self._flatten_dict(v, new_key, sep=sep).items())
-            else:
-                items.append((new_key, v))
-        return dict(items)
-    
-    def _drop_collection(self, sql: str) -> str:
-        try:
-            name = NoSQLParser.parse_drop_collection(sql)
-            if name not in self.storage.data['collections']:
-                return f"Error: Collection '{name}' does not exist"
-            del self.storage.data['collections'][name]
-            self.storage.save()
-            logger.info(f"Dropped collection '{name}'")
-            return f"Collection '{name}' dropped successfully"
-        except Exception as e:
-            logger.error(f"DROP COLLECTION failed: {e}")
-            return f"Error: {e}"

@@ -268,3 +268,23 @@ class NoSQLParser:
         if not match:
             raise ValueError("Invalid DROP COLLECTION syntax. Expected: DROP COLLECTION collection_name")
         return match.group(1)
+        
+    @staticmethod
+    def parse_create_index(sql: str) -> Dict[str, Any]:
+        pattern = r"CREATE\s+INDEX\s+(\w+)\s+ON\s+(\w+)\s*\(\s*([\w.]+)\s*\)"
+        match = re.match(pattern, sql, re.IGNORECASE)
+        if not match:
+            raise ValueError("Invalid CREATE INDEX syntax. Expected: CREATE INDEX idx_name ON collection (field)")
+        return {
+            "index_name": match.group(1),
+            "collection": match.group(2),
+            "field": match.group(3)
+        }
+
+    @staticmethod
+    def parse_drop_index(sql: str) -> str:
+        pattern = r"DROP\s+INDEX\s+(\w+)"
+        match = re.match(pattern, sql, re.IGNORECASE)
+        if not match:
+            raise ValueError("Invalid DROP INDEX syntax. Expected: DROP INDEX index_name")
+        return match.group(1)
