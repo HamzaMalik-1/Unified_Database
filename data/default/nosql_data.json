@@ -4,22 +4,19 @@
   "collections": {
     "users": [
       {
-        "id": 2,
-        "name": "sd",
-        "address": {
-          "city": "cc",
-          "zip": 23
-        }
-      }
-    ],
-    "docs": [
-      {
         "id": 1,
-        "content": "The quick brown fox jumps over the lazy dog"
+        "name": "Alice",
+        "hobbies": [
+          "swimming",
+          "dancing"
+        ]
       },
       {
-        "id": 2,
-        "content": "Fast database engine with full text search"
+        "id": 1,
+        "name": "Alice",
+        "hobbies": [
+          "swimming"
+        ]
       }
     ]
   },

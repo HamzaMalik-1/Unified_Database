@@ -75,7 +75,6 @@ class NoSQLDatabase:
                 if result.startswith("Error:"):
                     return ResponseFactory.error(result, status=400)
                 return ResponseFactory.text(result)
-            # ----- ADD THESE TWO BRANCHES -----
             elif cmd_upper.startswith("CREATE TEXT INDEX"):
                 result = self._create_text_index(command)
                 if result.startswith("Error:"):
@@ -86,7 +85,6 @@ class NoSQLDatabase:
                 if result.startswith("Error:"):
                     return ResponseFactory.error(result, status=400)
                 return ResponseFactory.text(result)
-            # ---------------------------------
             else:
                 return ResponseFactory.error(f"Unsupported NoSQL command: {command}", status=400)
         except Exception as e:
@@ -201,10 +199,23 @@ class NoSQLDatabase:
                     else:
                         continue
 
-                # Update document
                 old_doc = doc.copy()
-                for field, val in set_pairs:
-                    self._set_nested(doc, field, val)
+                # Apply SET assignments (supports both "field = value" and array operators)
+                for item in set_pairs:
+                    if len(item) == 3:
+                        field, op, val = item
+                        if op == "=":
+                            self._set_nested(doc, field, val)
+                        elif op == "PUSH":
+                            self._array_push(doc, field, val)
+                        elif op == "PULL":
+                            self._array_pull(doc, field, val)
+                        elif op == "ADDTOSET":
+                            self._array_add_to_set(doc, field, val)
+                    else:
+                        # Compatibility: old format (field, value)
+                        field, val = item
+                        self._set_nested(doc, field, val)
 
                 # Update equality indexes (incremental)
                 for idx_name, idx_info in self.storage.data['nosql_indexes'].items():
@@ -430,6 +441,165 @@ class NoSQLDatabase:
             logger.error(f"NoSQL SELECT failed: {e}")
             return f"Error: {e}"
 
+    # ---------- Array operators ----------
+    def _array_push(self, doc: Dict, field: str, value: Any):
+        current = self._get_nested(doc, field)
+        if current is None:
+            self._set_nested(doc, field, [value])
+        elif isinstance(current, list):
+            current.append(value)
+            self._set_nested(doc, field, current)
+        else:
+            # Convert non‑list to list and append
+            self._set_nested(doc, field, [current, value])
+
+    def _array_pull(self, doc: Dict, field: str, value: Any):
+        current = self._get_nested(doc, field)
+        if isinstance(current, list):
+            # For strings, case‑insensitive removal
+            new_list = []
+            for item in current:
+                if isinstance(item, str) and isinstance(value, str):
+                    if item.lower() != value.lower():
+                        new_list.append(item)
+                else:
+                    if item != value:
+                        new_list.append(item)
+            self._set_nested(doc, field, new_list)
+        # If not a list, nothing to pull
+
+    def _array_add_to_set(self, doc: Dict, field: str, value: Any):
+        current = self._get_nested(doc, field)
+        if current is None:
+            self._set_nested(doc, field, [value])
+        elif isinstance(current, list):
+            # Check if value already exists (case‑insensitive for strings)
+            exists = False
+            for item in current:
+                if isinstance(item, str) and isinstance(value, str):
+                    if item.lower() == value.lower():
+                        exists = True
+                        break
+                else:
+                    if item == value:
+                        exists = True
+                        break
+            if not exists:
+                current.append(value)
+                self._set_nested(doc, field, current)
+        else:
+            # Convert to list if not already
+            self._set_nested(doc, field, [current, value])
+
+    # ---------- Helper methods ----------
+    def _get_nested(self, doc: Dict, path: str) -> Any:
+        parts = path.split('.')
+        current = doc
+        for p in parts:
+            if isinstance(current, dict) and p in current:
+                current = current[p]
+            else:
+                return None
+        return current
+
+    def _set_nested(self, doc: Dict, path: str, value: Any) -> None:
+        parts = path.split('.')
+        current = doc
+        for i, p in enumerate(parts[:-1]):
+            if p not in current or not isinstance(current[p], dict):
+                current[p] = {}
+            current = current[p]
+        current[parts[-1]] = value
+
+    def _evaluate_condition(self, doc: Dict, condition_str: str) -> bool:
+        if not condition_str:
+            return True
+        cond = condition_str.strip()
+        # First, try to match CONTAINS operator (case‑insensitive, works on arrays and strings)
+        contains_match = re.match(r'^([\w.]+)\s+CONTAINS\s+(.+)$', cond, re.IGNORECASE)
+        if contains_match:
+            field = contains_match.group(1).strip()
+            right_raw = contains_match.group(2).strip()
+            if right_raw.startswith("'") and right_raw.endswith("'"):
+                right_val = right_raw[1:-1]
+            else:
+                right_val = right_raw
+            left_val = self._get_nested(doc, field)
+            if left_val is None:
+                return False
+            if isinstance(left_val, list):
+                for item in left_val:
+                    if isinstance(item, str) and isinstance(right_val, str):
+                        if right_val.lower() in item.lower():
+                            return True
+                    elif item == right_val:
+                        return True
+                return False
+            elif isinstance(left_val, str):
+                return right_val.lower() in left_val.lower()
+            else:
+                return False
+
+        # Then handle standard operators
+        match = re.match(r'^([\w.]+)\s*([=<>!]+)\s*(.+)$', cond)
+        if not match:
+            return False
+        field = match.group(1).strip()
+        operator = match.group(2).strip()
+        right_raw = match.group(3).strip()
+        if right_raw.startswith("'") and right_raw.endswith("'"):
+            right_val = right_raw[1:-1]
+        elif right_raw.isdigit():
+            right_val = int(right_raw)
+        else:
+            try:
+                right_val = float(right_raw)
+            except:
+                right_val = right_raw
+        left_val = self._get_nested(doc, field)
+        if operator == "=" or operator == "==":
+            return left_val == right_val
+        elif operator == "!=":
+            return left_val != right_val
+        elif operator == ">":
+            return left_val > right_val
+        elif operator == "<":
+            return left_val < right_val
+        elif operator == ">=":
+            return left_val >= right_val
+        elif operator == "<=":
+            return left_val <= right_val
+        else:
+            return False
+
+    def _prepare_aggregates(self, columns: List[str]) -> Tuple[List[str], Dict[str, Tuple[str, str]]]:
+        regular = []
+        aggregates = {}
+        agg_patterns = {
+            "COUNT": r"COUNT\(\s*(?:\*|\w+)\s*\)",
+            "SUM": r"SUM\(\s*([\w.]+)\s*\)",
+            "AVG": r"AVG\(\s*([\w.]+)\s*\)",
+            "MIN": r"MIN\(\s*([\w.]+)\s*\)",
+            "MAX": r"MAX\(\s*([\w.]+)\s*\)"
+        }
+        for col in columns:
+            matched = False
+            for func, pattern in agg_patterns.items():
+                match = re.match(pattern, col, re.IGNORECASE)
+                if match:
+                    if func == "COUNT":
+                        inner = "count"
+                    else:
+                        inner = match.group(1)
+                    alias_match = re.search(r"\s+AS\s+(\w+)", col, re.IGNORECASE)
+                    alias = alias_match.group(1) if alias_match else f"{func}({inner})"
+                    aggregates[alias] = (func, inner)
+                    matched = True
+                    break
+            if not matched:
+                regular.append(col)
+        return regular, aggregates
+
     # ---------- Index management ----------
     def _create_index(self, sql: str) -> str:
         try:
@@ -492,7 +662,6 @@ class NoSQLDatabase:
                 return (idx_name, value)
         return None
 
-    # ---------- Text index ----------
     def _create_text_index(self, sql: str) -> str:
         try:
             parsed = NoSQLParser.parse_create_text_index(sql)
@@ -565,101 +734,3 @@ class NoSQLDatabase:
                             inverted.setdefault(word, []).append(idx)
                 idx_info["inverted"] = inverted
         self.storage.save()
-
-    # ---------- Helper methods ----------
-    def _get_nested(self, doc: Dict, path: str) -> Any:
-        parts = path.split('.')
-        current = doc
-        for p in parts:
-            if isinstance(current, dict) and p in current:
-                current = current[p]
-            else:
-                return None
-        return current
-
-    def _set_nested(self, doc: Dict, path: str, value: Any) -> None:
-        parts = path.split('.')
-        current = doc
-        for i, p in enumerate(parts[:-1]):
-            if p not in current or not isinstance(current[p], dict):
-                current[p] = {}
-            current = current[p]
-        current[parts[-1]] = value
-
-    def _evaluate_condition(self, doc: Dict, condition_str: str) -> bool:
-        if not condition_str:
-            return True
-        cond = condition_str.strip()
-        # First, try to match CONTAINS operator
-        contains_match = re.match(r'^([\w.]+)\s+CONTAINS\s+(.+)$', cond, re.IGNORECASE)
-        if contains_match:
-            field = contains_match.group(1).strip()
-            right_raw = contains_match.group(2).strip()
-            if right_raw.startswith("'") and right_raw.endswith("'"):
-                right_val = right_raw[1:-1].lower()
-            else:
-                right_val = right_raw.lower()
-            left_val = self._get_nested(doc, field)
-            if not isinstance(left_val, str):
-                return False
-            return right_val in left_val.lower()
-
-        # Then handle standard operators
-        match = re.match(r'^([\w.]+)\s*([=<>!]+)\s*(.+)$', cond)
-        if not match:
-            return False
-        field = match.group(1).strip()
-        operator = match.group(2).strip()
-        right_raw = match.group(3).strip()
-        if right_raw.startswith("'") and right_raw.endswith("'"):
-            right_val = right_raw[1:-1]
-        elif right_raw.isdigit():
-            right_val = int(right_raw)
-        else:
-            try:
-                right_val = float(right_raw)
-            except:
-                right_val = right_raw
-        left_val = self._get_nested(doc, field)
-        if operator == "=" or operator == "==":
-            return left_val == right_val
-        elif operator == "!=":
-            return left_val != right_val
-        elif operator == ">":
-            return left_val > right_val
-        elif operator == "<":
-            return left_val < right_val
-        elif operator == ">=":
-            return left_val >= right_val
-        elif operator == "<=":
-            return left_val <= right_val
-        else:
-            return False
-
-    def _prepare_aggregates(self, columns: List[str]) -> Tuple[List[str], Dict[str, Tuple[str, str]]]:
-        regular = []
-        aggregates = {}
-        agg_patterns = {
-            "COUNT": r"COUNT\(\s*(?:\*|\w+)\s*\)",
-            "SUM": r"SUM\(\s*([\w.]+)\s*\)",
-            "AVG": r"AVG\(\s*([\w.]+)\s*\)",
-            "MIN": r"MIN\(\s*([\w.]+)\s*\)",
-            "MAX": r"MAX\(\s*([\w.]+)\s*\)"
-        }
-        for col in columns:
-            matched = False
-            for func, pattern in agg_patterns.items():
-                match = re.match(pattern, col, re.IGNORECASE)
-                if match:
-                    if func == "COUNT":
-                        inner = "count"
-                    else:
-                        inner = match.group(1)
-                    alias_match = re.search(r"\s+AS\s+(\w+)", col, re.IGNORECASE)
-                    alias = alias_match.group(1) if alias_match else f"{func}({inner})"
-                    aggregates[alias] = (func, inner)
-                    matched = True
-                    break
-            if not matched:
-                regular.append(col)
-        return regular, aggregates
