@@ -10,7 +10,8 @@
           "city": "Boston"
         }
       }
-    ]
+    ],
+    "collect": []
   },
   "nosql_indexes": {},
   "text_indexes": {}

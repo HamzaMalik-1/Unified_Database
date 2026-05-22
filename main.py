@@ -5,6 +5,7 @@ from dispatcher.unified_db import UnifiedDB
 from loguru import logger
 from processor.nlp_processor import NLPProcessor
 from model.NLP_model import NLPRequest
+from typing import Optional
 
 
 app = FastAPI()
@@ -47,9 +48,23 @@ def nlp_llm_only(req: NLPRequest):
 
 
 
+@app.get("/api/databases")
+def list_databases():
+    return {"databases": db.get_all_databases()}
+
 @app.get("/api/stats")
-def stats():
-    return db.get_stats()
+def stats(db_name: Optional[str] = None):
+    if db_name:
+        # Stats for a specific database
+        stats_data = db.get_stats_for_database(db_name)
+        stats_data["database"] = db_name
+        return stats_data
+    else:
+        # Stats for all databases
+        all_stats = {}
+        for name in db.get_all_databases():
+            all_stats[name] = db.get_stats_for_database(name)
+        return all_stats
 
 @app.get("/api/schema/{table_name}")
 def get_table_schema(table_name: str):
@@ -57,3 +72,12 @@ def get_table_schema(table_name: str):
     if schema is None:
         raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found")
     return {"table": table_name, "columns": schema}
+
+# ---------- Database metadata endpoints ----------
+@app.get("/api/current_database")
+def current_database():
+    try:
+        current = db.get_current_database()
+        return {"database": current}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))

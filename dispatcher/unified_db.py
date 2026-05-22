@@ -3,7 +3,7 @@ import time
 from catalog.database_catalog import DatabaseCatalog
 from loguru import logger
 from utils.response import ResponseFactory, APIResponse
-from typing import Dict,Any
+from typing import Dict,Any,List
 
 class UnifiedDB:
     def __init__(self):
@@ -73,3 +73,12 @@ class UnifiedDB:
     def get_table_schema(self, table_name: str):
         sql_engine = self.catalog.get_current_sql_engine()
         return sql_engine.get_schema(table_name)
+        
+    def get_all_databases(self) -> List[str]:
+        return self.catalog.get_all_database_names()
+
+    def get_stats_for_database(self, db_name: str) -> Dict[str, Any]:
+        return self.catalog.get_database_stats(db_name)
+    
+    def get_current_database(self) -> str:
+        return self.catalog.get_current_database_name()

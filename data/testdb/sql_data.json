@@ -1,0 +1,36 @@
+{
+  "schemas": {
+    "AC": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      }
+    ]
+  },
+  "tables": {
+    "AC": []
+  },
+  "indexes": {},
+  "foreign_keys": {
+    "AC": []
+  },
+  "check_constraints": {
+    "AC": []
+  },
+  "auto_increment": {},
+  "views": {},
+  "procedures": {},
+  "triggers": []
+}
