@@ -40,6 +40,11 @@ class SQLDatabase:
                 if result.startswith("Error:"):
                     return ResponseFactory.error(result, status=400)
                 return ResponseFactory.text(result)
+            elif cmd_upper.startswith("INSERT INTO") and "SELECT" in cmd_upper and "FROM NOSQL" in cmd_upper:
+                result = self._insert_from_nosql(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
             elif cmd_upper.startswith("INSERT INTO"):
                 result = self._insert(command)
                 if result.startswith("Error:"):
@@ -602,6 +607,30 @@ class SQLDatabase:
             if not rows:
                 return "Update completed (0 rows affected)"
 
+            # ---------- Cross‑model IN subqueries (SQL with NoSQL) ----------
+            if where_cond and "NOSQL SELECT" in where_cond.upper() and self.nosql_engine:
+                import re
+                pattern = r"(\w+)\s+IN\s*\(\s*NOSQL\s+(SELECT.+?)\s*\)"
+                match = re.search(pattern, where_cond, re.IGNORECASE | re.DOTALL)
+                if match:
+                    outer_column = match.group(1)
+                    inner_nosql_sql = match.group(2).strip()
+                    # Execute NoSQL command (the inner SELECT without the NOSQL prefix)
+                    resp = self.nosql_engine.execute(inner_nosql_sql)
+                    if not resp.success:
+                        return f"Error in cross-model subquery: {resp.message}"
+                    values = []
+                    if resp.data.type == "table":
+                        values = [row.get(list(row.keys())[0]) for row in resp.data.content if row]
+                    elif resp.data.type == "json":
+                        if isinstance(resp.data.content, list):
+                            values = [list(item.values())[0] for item in resp.data.content if item]
+                    # Pre‑filter rows
+                    rows = [r for r in rows if r.get(outer_column) in values]
+                    where_cond = None
+            # -----------------------------------------------------------------
+
+            # Validate column existence and types
             schema_cols = {col["name"]: col for col in schema}
             for col in set_assignments.keys():
                 if col not in schema_cols:
@@ -609,13 +638,12 @@ class SQLDatabase:
 
             updated_count = 0
             for row in rows:
+                # Check WHERE condition (if any left)
                 if where_cond and not self._evaluate_condition(row, where_cond):
                     continue
 
-                # Save original row for triggers
-                original_row = row.copy()
+                # Apply updates to a copy to avoid partial updates if constraints fail
                 updated_row = row.copy()
-
                 for col, val in set_assignments.items():
                     col_def = schema_cols[col]
                     try:
@@ -624,14 +652,12 @@ class SQLDatabase:
                         return f"Error in column '{col}': {e}"
                     if typed_val is None and "NOT NULL" in col_def["constraints"]:
                         return f"Error: Column '{col}' cannot be NULL"
+                    # Foreign key check
                     if not self._check_parent_exists(table_name, col, typed_val):
                         return f"Error: Foreign key violation on {col}: value {typed_val} not found in parent table"
                     updated_row[col] = typed_val
 
-                # Fire BEFORE UPDATE triggers
-                self._fire_triggers(table_name, "BEFORE", "UPDATE", old_row=original_row, new_row=updated_row)
-
-                # Check constraints on the updated row
+                # CHECK CONSTRAINTS AFTER UPDATE
                 error = self._check_constraints(table_name, updated_row)
                 if error:
                     return error
@@ -640,9 +666,6 @@ class SQLDatabase:
                 for col, val in set_assignments.items():
                     row[col] = updated_row[col]
                 updated_count += 1
-
-                # Fire AFTER UPDATE triggers
-                self._fire_triggers(table_name, "AFTER", "UPDATE", old_row=original_row, new_row=row)
 
             self.storage.set_table_data(table_name, rows)
             logger.info(f"Updated {updated_count} row(s) in '{table_name}'")
@@ -656,13 +679,36 @@ class SQLDatabase:
             parsed = SQLParser.parse_delete(sql)
             table_name = parsed["table"]
             where_cond = parsed["where"]
+
             if not self.storage.get_schema(table_name):
                 return f"Error: Table '{table_name}' does not exist"
             rows = self.storage.get_table_data(table_name)
             if not rows:
                 return "Delete completed (0 rows affected)"
 
-            # Identify rows to delete
+            # ---------- Cross‑model IN subqueries (SQL with NoSQL) ----------
+            if where_cond and "NOSQL SELECT" in where_cond.upper() and self.nosql_engine:
+                import re
+                pattern = r"(\w+)\s+IN\s*\(\s*NOSQL\s+(SELECT.+?)\s*\)"
+                match = re.search(pattern, where_cond, re.IGNORECASE | re.DOTALL)
+                if match:
+                    outer_column = match.group(1)
+                    inner_nosql_sql = match.group(2).strip()
+                    resp = self.nosql_engine.execute(inner_nosql_sql)
+                    if not resp.success:
+                        return f"Error in cross-model subquery: {resp.message}"
+                    values = []
+                    if resp.data.type == "table":
+                        values = [row.get(list(row.keys())[0]) for row in resp.data.content if row]
+                    elif resp.data.type == "json":
+                        if isinstance(resp.data.content, list):
+                            values = [list(item.values())[0] for item in resp.data.content if item]
+                    # Pre‑filter rows
+                    rows = [r for r in rows if r.get(outer_column) in values]
+                    where_cond = None
+            # ---------------------------------------------------------------
+
+            # Identify rows to delete (apply remaining WHERE condition, if any)
             to_delete = []
             for row in rows:
                 if where_cond is None or self._evaluate_condition(row, where_cond):
@@ -1332,3 +1378,101 @@ class SQLDatabase:
         result = self.execute(statement)
         if not result.success:
             logger.error(f"Trigger failed: {result.message}")
+
+    def _insert_from_nosql(self, sql: str) -> str:
+        """
+        Parses: INSERT INTO table (col1, col2, ...) SELECT col1, col2, ... FROM NOSQL (nosql_select_command)
+        """
+        try:
+            # Pattern: INSERT INTO table (cols) SELECT cols FROM NOSQL (subquery)
+            pattern = r"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)\s+SELECT\s+(.+)\s+FROM\s+NOSQL\s+\((.+)\)"
+            match = re.match(pattern, sql, re.IGNORECASE | re.DOTALL)
+            if not match:
+                return "Error: Invalid INSERT ... SELECT FROM NOSQL syntax"
+            table_name = match.group(1)
+            target_cols_str = match.group(2).strip()
+            select_cols_str = match.group(3).strip()
+            nosql_subquery = match.group(4).strip()
+
+            target_cols = [c.strip() for c in target_cols_str.split(',')]
+            select_cols = [c.strip() for c in select_cols_str.split(',')]
+
+            if len(target_cols) != len(select_cols):
+                return f"Error: Number of target columns ({len(target_cols)}) does not match number of selected columns ({len(select_cols)})"
+
+            # Execute NoSQL subquery
+            if not self.nosql_engine:
+                return "Error: NoSQL engine not available"
+            nosql_resp = self.nosql_engine.execute(nosql_subquery)
+            if not nosql_resp.success:
+                return f"Error in NoSQL subquery: {nosql_resp.message}"
+
+            # Extract documents from NoSQL result
+            documents = []
+            if nosql_resp.data.type == "table":
+                documents = nosql_resp.data.content
+            elif nosql_resp.data.type == "json":
+                if isinstance(nosql_resp.data.content, list):
+                    documents = nosql_resp.data.content
+                else:
+                    documents = [nosql_resp.data.content]
+            else:
+                return "Error: NoSQL subquery did not return a list of documents"
+
+            # For each document, build a row and insert
+            inserted = 0
+            schema = self.storage.get_schema(table_name)
+            if not schema:
+                return f"Error: Table '{table_name}' does not exist"
+
+            for doc in documents:
+                # Build value dict mapping target column to value from document (using selected column name as key)
+                value_dict = {}
+                for tcol, scol in zip(target_cols, select_cols):
+                    # The selected column may be a field path (e.g., "address.city")
+                    # We need to get nested value from document
+                    val = self._get_nested_nosql(doc, scol)
+                    value_dict[tcol] = val
+                # Build row using existing _insert logic? We'll reuse the row building logic but we need to bypass normal INSERT parsing.
+                # Simpler: create a temporary INSERT statement for each row? That would be inefficient.
+                # Instead, we directly build a row dict and append to table data, after checking constraints, foreign keys, triggers.
+                # We'll replicate the row building logic from _insert but use value_dict.
+                # Let's reuse the existing _insert method by constructing a fake INSERT statement.
+                # But that would be inefficient and might cause parsing overhead. For simplicity, we'll call _insert with a constructed command.
+                # However, _insert expects a full INSERT command string. We'll build one:
+                vals_str = ','.join(self._quote_value(value_dict[tcol]) for tcol in target_cols)
+                cols_str = ','.join(target_cols)
+                insert_sql = f"INSERT INTO {table_name} ({cols_str}) VALUES ({vals_str})"
+                result = self._insert(insert_sql)
+                if result.startswith("Error:"):
+                    return result
+                inserted += 1
+
+            return f"Insert successful. {inserted} row(s) inserted."
+        except Exception as e:
+            logger.error(f"INSERT FROM NOSQL failed: {e}")
+            return f"Error: {e}"
+
+    def _get_nested_nosql(self, doc: Dict, path: str) -> Any:
+        """Retrieve value from nested document using dot notation (e.g., 'address.city')."""
+        parts = path.split('.')
+        current = doc
+        for p in parts:
+            if isinstance(current, dict) and p in current:
+                current = current[p]
+            else:
+                return None
+        return current
+
+    def _quote_value(self, val: Any) -> str:
+        """Return SQL‑quoted representation of a value."""
+        if val is None:
+            return "NULL"
+        if isinstance(val, str):
+            return f"'{val}'"
+        if isinstance(val, (int, float)):
+            return str(val)
+        if isinstance(val, dict):
+            # Convert dict to JSON string (single‑quoted for SQL)
+            return f"'{json.dumps(val)}'"
+        return f"'{val}'"

@@ -2,21 +2,13 @@
   "schemas": {},
   "tables": {},
   "collections": {
-    "users": [
+    "nosql_users": [
       {
-        "id": 1,
-        "name": "Alice",
-        "hobbies": [
-          "swimming",
-          "dancing"
-        ]
-      },
-      {
-        "id": 1,
-        "name": "Alice",
-        "hobbies": [
-          "swimming"
-        ]
+        "user_id": 1,
+        "user_name": "Alice",
+        "address": {
+          "city": "Boston"
+        }
       }
     ]
   },

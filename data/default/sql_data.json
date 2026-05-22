@@ -14,25 +14,9 @@
         "constraints": [],
         "default": null,
         "auto_increment": false
-      }
-    ],
-    "audit": [
-      {
-        "name": "action",
-        "type": "TEXT",
-        "constraints": [],
-        "default": null,
-        "auto_increment": false
       },
       {
-        "name": "old_name",
-        "type": "TEXT",
-        "constraints": [],
-        "default": null,
-        "auto_increment": false
-      },
-      {
-        "name": "new_name",
+        "name": "city",
         "type": "TEXT",
         "constraints": [],
         "default": null,
@@ -43,129 +27,21 @@
   "tables": {
     "users": [
       {
-        "id": 2,
-        "name": "Bob"
-      },
-      {
-        "id": 123,
-        "name": "sadv"
-      },
-      {
-        "id": 111,
-        "name": "Bob"
-      },
-      {
-        "id": 3,
-        "name": "Charlie"
-      },
-      {
-        "id": 23,
-        "name": "Charlie"
-      },
-      {
-        "id": 100,
-        "name": "Test"
-      },
-      {
-        "id": 999,
-        "name": "TestUser"
-      },
-      {
-        "id": 322,
-        "name": "TestUser"
-      },
-      {
-        "id": 412,
-        "name": "TestUser"
-      },
-      {
-        "id": 434,
-        "name": "jnjknjk"
-      }
-    ],
-    "audit": [
-      {
-        "action": "test",
-        "old_name": null,
-        "new_name": "value"
-      },
-      {
-        "action": "insert",
-        "old_name": null,
-        "new_name": "TestUser"
-      },
-      {
-        "action": "test",
-        "old_name": null,
-        "new_name": null
-      },
-      {
-        "action": "insert",
-        "old_name": null,
-        "new_name": "jnjknjk"
-      },
-      {
-        "action": "test",
-        "old_name": null,
-        "new_name": null
-      },
-      {
-        "action": "update",
-        "old_name": "dnjener",
-        "new_name": "Bob"
-      },
-      {
-        "action": "update",
-        "old_name": "Bob",
-        "new_name": "mmm"
-      },
-      {
-        "action": "delete",
-        "old_name": "mmm",
-        "new_name": null
+        "id": 1,
+        "name": "Alice",
+        "city": null
       }
     ]
   },
   "indexes": {},
   "foreign_keys": {
-    "users": [],
-    "audit": []
+    "users": []
   },
   "check_constraints": {
-    "users": [],
-    "audit": []
+    "users": []
   },
   "auto_increment": {},
   "views": {},
   "procedures": {},
-  "triggers": [
-    {
-      "name": "audit_insert",
-      "timing": "AFTER",
-      "event": "INSERT",
-      "table": "users",
-      "statement": "INSERT INTO audit (action, new_name) VALUES ('insert', NEW.name)"
-    },
-    {
-      "name": "audit_update",
-      "timing": "AFTER",
-      "event": "UPDATE",
-      "table": "users",
-      "statement": "INSERT INTO audit (action, old_name, new_name) VALUES ('update', OLD.name, NEW.name)"
-    },
-    {
-      "name": "audit_delete",
-      "timing": "AFTER",
-      "event": "DELETE",
-      "table": "users",
-      "statement": "INSERT INTO audit (action, old_name) VALUES ('delete', OLD.name)"
-    },
-    {
-      "name": "test_trigger",
-      "timing": "AFTER",
-      "event": "INSERT",
-      "table": "users",
-      "statement": "INSERT INTO audit (action) VALUES ('test')"
-    }
-  ]
+  "triggers": []
 }
