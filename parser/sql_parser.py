@@ -798,3 +798,27 @@ class SQLParser:
                         cleaned.append(arg)
             args = cleaned
         return {"proc_name": proc_name, "args": args}
+           
+    @staticmethod
+    def parse_create_trigger(sql: str) -> Dict[str, Any]:
+        pattern = r"CREATE\s+TRIGGER\s+(\w+)\s+(BEFORE|AFTER)\s+(INSERT|UPDATE|DELETE)\s+ON\s+(\w+)\s+FOR\s+EACH\s+ROW\s+BEGIN\s+(.+?)\s+END"
+        match = re.match(pattern, sql, re.IGNORECASE | re.DOTALL)
+        if not match:
+            raise ValueError("Invalid CREATE TRIGGER syntax")
+        return {
+            "name": match.group(1),
+            "timing": match.group(2).upper(),
+            "event": match.group(3).upper(),
+            "table": match.group(4),
+            "statement": match.group(5).strip()
+        }
+
+    @staticmethod
+    def parse_drop_trigger(sql: str) -> str:
+        pattern = r"DROP\s+TRIGGER\s+(\w+)"
+        match = re.match(pattern, sql, re.IGNORECASE)
+        if not match:
+            raise ValueError("Invalid DROP TRIGGER syntax")
+        return match.group(1)
+    
+    

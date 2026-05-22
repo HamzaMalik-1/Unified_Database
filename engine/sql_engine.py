@@ -24,6 +24,8 @@ class SQLDatabase:
             self.storage.data['views'] = {}
         if 'procedures' not in self.storage.data:
             self.storage.data['procedures'] = {}
+        if 'triggers' not in self.storage.data:
+            self.storage.data['triggers'] = []
         self.storage.save()
         self.nosql_engine = None
 
@@ -108,6 +110,17 @@ class SQLDatabase:
                 return ResponseFactory.text(result)
             elif cmd_upper.startswith("CALL"):
                 return self._call_procedure(command)
+            
+            elif cmd_upper.startswith("CREATE TRIGGER"):
+                result = self._create_trigger(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
+            elif cmd_upper.startswith("DROP TRIGGER"):
+                result = self._drop_trigger(command)
+                if result.startswith("Error:"):
+                    return ResponseFactory.error(result, status=400)
+                return ResponseFactory.text(result)
             else:
                 return ResponseFactory.error(f"Unsupported SQL command: {command}", status=400)
         except Exception as e:
@@ -173,12 +186,10 @@ class SQLDatabase:
                 # ----- Auto‑increment (highest priority) -----
                 if col_def.get('auto_increment'):
                     if val is None:
-                        # Generate next value
                         counter = self.storage.data['auto_increment'].get(table_name, 0) + 1
                         self.storage.data['auto_increment'][table_name] = counter
                         typed_val = counter
                     else:
-                        # User‑supplied value – validate and update counter if larger
                         try:
                             user_val = int(val)
                         except (ValueError, TypeError):
@@ -187,9 +198,7 @@ class SQLDatabase:
                         if user_val > current:
                             self.storage.data['auto_increment'][table_name] = user_val
                         typed_val = user_val
-                    # Skip further processing (no DEFAULT, no type validation)
                 else:
-                    # ----- Default value (if no value provided) -----
                     if val is None and col_def.get("default") is not None:
                         default_val = col_def["default"]
                         try:
@@ -197,7 +206,6 @@ class SQLDatabase:
                         except:
                             typed_val = default_val
                     else:
-                        # ----- Normal type validation -----
                         try:
                             typed_val = DataType.validate(val, col_type) if val is not None else None
                         except ValueError as e:
@@ -218,7 +226,10 @@ class SQLDatabase:
                         return f"Error: {e}"
                 row[col_name] = typed_val
 
-            # CHECK constraints and foreign keys (unchanged)
+            # ---------- Fire BEFORE INSERT triggers ----------
+            self._fire_triggers(table_name, "BEFORE", "INSERT", new_row=row)
+
+            # CHECK constraints and foreign keys
             error = self._check_constraints(table_name, row)
             if error:
                 return error
@@ -229,10 +240,14 @@ class SQLDatabase:
             existing_rows.append(row)
             self.storage.set_table_data(table_name, existing_rows)
             logger.info(f"Inserted row into '{table_name}': {row}")
+
+            # ---------- Fire AFTER INSERT triggers ----------
+            self._fire_triggers(table_name, "AFTER", "INSERT", new_row=row)
+
             return "Insert successful"
         except Exception as e:
             logger.error(f"INSERT failed: {e}")
-            return f"Error: {e}"    
+            return f"Error: {e}"
            
     def _evaluate_condition(self, row: Dict, condition_str: str) -> bool:
         if not condition_str:
@@ -572,7 +587,7 @@ class SQLDatabase:
             logger.error(f"SELECT failed: {e}")
             return f"Error: {e}"
         
-        
+            
     def _update(self, sql: str) -> str:
         try:
             parsed = SQLParser.parse_update(sql)
@@ -597,8 +612,10 @@ class SQLDatabase:
                 if where_cond and not self._evaluate_condition(row, where_cond):
                     continue
 
-                # Apply updates to a copy to avoid partial updates if constraints fail
+                # Save original row for triggers
+                original_row = row.copy()
                 updated_row = row.copy()
+
                 for col, val in set_assignments.items():
                     col_def = schema_cols[col]
                     try:
@@ -607,20 +624,25 @@ class SQLDatabase:
                         return f"Error in column '{col}': {e}"
                     if typed_val is None and "NOT NULL" in col_def["constraints"]:
                         return f"Error: Column '{col}' cannot be NULL"
-                    # Foreign key check
                     if not self._check_parent_exists(table_name, col, typed_val):
                         return f"Error: Foreign key violation on {col}: value {typed_val} not found in parent table"
                     updated_row[col] = typed_val
 
-                # **CHECK CONSTRAINTS AFTER UPDATE**
+                # Fire BEFORE UPDATE triggers
+                self._fire_triggers(table_name, "BEFORE", "UPDATE", old_row=original_row, new_row=updated_row)
+
+                # Check constraints on the updated row
                 error = self._check_constraints(table_name, updated_row)
                 if error:
                     return error
 
-                # All checks passed, apply the update to the real row
+                # Apply the update to the real row
                 for col, val in set_assignments.items():
                     row[col] = updated_row[col]
                 updated_count += 1
+
+                # Fire AFTER UPDATE triggers
+                self._fire_triggers(table_name, "AFTER", "UPDATE", old_row=original_row, new_row=row)
 
             self.storage.set_table_data(table_name, rows)
             logger.info(f"Updated {updated_count} row(s) in '{table_name}'")
@@ -628,7 +650,7 @@ class SQLDatabase:
         except Exception as e:
             logger.error(f"UPDATE failed: {e}")
             return f"Error: {e}"
-        
+
     def _delete(self, sql: str) -> str:
         try:
             parsed = SQLParser.parse_delete(sql)
@@ -639,15 +661,16 @@ class SQLDatabase:
             rows = self.storage.get_table_data(table_name)
             if not rows:
                 return "Delete completed (0 rows affected)"
-            # Before deleting, check foreign key dependencies
+
+            # Identify rows to delete
             to_delete = []
             for row in rows:
                 if where_cond is None or self._evaluate_condition(row, where_cond):
                     to_delete.append(row)
-            # For each row to delete, check if any child references exist (RESTRICT/NO ACTION)
+
+            # Check foreign key dependencies (RESTRICT/NO ACTION)
             for row in to_delete:
                 for col_name, col_val in row.items():
-                    # Check if this column is referenced by a foreign key with RESTRICT/NO ACTION
                     for child_table, fk_list in self.storage.data['foreign_keys'].items():
                         for fk in fk_list:
                             if fk["ref_table"] == table_name and fk["ref_column"] == col_name:
@@ -658,13 +681,24 @@ class SQLDatabase:
                                     for child_row in child_rows:
                                         if child_row.get(child_col) == col_val:
                                             return f"Error: Cannot delete row because child row exists in {child_table}.{child_col}"
-            # Now delete
+
+            # Fire BEFORE DELETE triggers
+            for row in to_delete:
+                self._fire_triggers(table_name, "BEFORE", "DELETE", old_row=row)
+
+            # Delete rows
             new_rows = [r for r in rows if r not in to_delete]
             self.storage.set_table_data(table_name, new_rows)
-            # Handle CASCADE / SET NULL after deletion (for child tables)
+
+            # Fire AFTER DELETE triggers
+            for row in to_delete:
+                self._fire_triggers(table_name, "AFTER", "DELETE", old_row=row)
+
+            # Handle CASCADE / SET NULL after deletion
             for row in to_delete:
                 for col_name, col_val in row.items():
                     self._handle_child_references(table_name, col_name, col_val, is_delete=True)
+
             self.storage.save()
             logger.info(f"Deleted {len(to_delete)} row(s) from '{table_name}'")
             return f"Delete successful. {len(to_delete)} row(s) deleted."
@@ -1248,3 +1282,53 @@ class SQLDatabase:
         except Exception as e:
             logger.error(f"CALL failed: {e}")
             return ResponseFactory.error(str(e), status=500)
+        
+            
+            
+    def _create_trigger(self, sql: str) -> str:
+        try:
+            parsed = SQLParser.parse_create_trigger(sql)
+            self.storage.data['triggers'].append(parsed)
+            self.storage.save()
+            logger.info(f"Created trigger '{parsed['name']}'")
+            return f"Trigger '{parsed['name']}' created successfully"
+        except Exception as e:
+            logger.error(f"CREATE TRIGGER failed: {e}")
+            return f"Error: {e}"
+
+    def _drop_trigger(self, sql: str) -> str:
+        try:
+            name = SQLParser.parse_drop_trigger(sql)
+            triggers = self.storage.data['triggers']
+            for i, t in enumerate(triggers):
+                if t['name'] == name:
+                    del triggers[i]
+                    self.storage.save()
+                    logger.info(f"Dropped trigger '{name}'")
+                    return f"Trigger '{name}' dropped successfully"
+            return f"Error: Trigger '{name}' does not exist"
+        except Exception as e:
+            logger.error(f"DROP TRIGGER failed: {e}")
+            return f"Error: {e}"
+
+    def _fire_triggers(self, table: str, timing: str, event: str, old_row: Dict = None, new_row: Dict = None):
+        print(f"🔥 Checking triggers for {table} {timing} {event}")
+        for trigger in self.storage.data['triggers']:
+            print(f"   Trigger: {trigger['name']} on {trigger['table']} {trigger['timing']} {trigger['event']}")
+            if trigger['table'] == table and trigger['timing'] == timing and trigger['event'] == event:
+                print(f"   ✅ Firing {trigger['name']}")
+                self._execute_trigger(trigger, old_row, new_row)
+
+    def _execute_trigger(self, trigger_def: dict, old_row: dict = None, new_row: dict = None):
+        statement = trigger_def['statement']
+        if old_row:
+            for col, val in old_row.items():
+                statement = re.sub(rf'OLD\.{col}\b', repr(val), statement)
+        if new_row:
+            for col, val in new_row.items():
+                statement = re.sub(rf'NEW\.{col}\b', repr(val), statement)
+        # Do NOT add SQL prefix
+        logger.info(f"Executing trigger: {statement}")
+        result = self.execute(statement)
+        if not result.success:
+            logger.error(f"Trigger failed: {result.message}")
