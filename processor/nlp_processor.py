@@ -4,6 +4,8 @@ from typing import Optional, List, Dict, Any, Tuple
 from word2number import w2n
 
 class NLPProcessor:
+    OLLAMA_MODEL = "phi35:latest"   # or "coder:latest" or "mini-coder:latest"
+    OLLAMA_URL = "http://localhost:11434/api/generate"
     def __init__(self, catalog):
         self.catalog = catalog
 
@@ -14,8 +16,8 @@ class NLPProcessor:
         if command:
             return command
         # Optionally enable LLM fallback
-        # return self._llm_fallback(text)
-        return None
+        return self._llm_fallback(text)
+        # return None
 
     # ==================== Rule‑based processing ====================
     def _rule_based(self, text: str) -> Optional[str]:
@@ -690,7 +692,6 @@ class NLPProcessor:
             return f"NOSQL DROP COLLECTION {coll}"
         return None
 
-    # ---------- LLM fallback ----------
     def _llm_fallback(self, text: str) -> Optional[str]:
         prompt = f"""You are a database assistant. Convert the following user request into a SQL or NoSQL command.
 The command must start with either "SQL" or "NOSQL".
@@ -702,13 +703,20 @@ Command:"""
         try:
             import requests
             response = requests.post(
-                "http://localhost:11434/api/generate",
-                json={"model": "phi3:mini", "prompt": prompt, "stream": False, "temperature": 0},
+                self.OLLAMA_URL,
+                json={
+                    "model": self.OLLAMA_MODEL,
+                    "prompt": prompt,
+                    "stream": False,
+                    "temperature": 0,
+                    "max_tokens": 200
+                },
                 timeout=30
             )
-            result = response.json().get("response", "").strip()
-            if result.upper().startswith("SQL") or result.upper().startswith("NOSQL"):
-                return result
+            if response.status_code == 200:
+                result = response.json().get("response", "").strip()
+                if result.upper().startswith("SQL") or result.upper().startswith("NOSQL"):
+                    return result
             return None
         except Exception as e:
             print(f"LLM error: {e}")
