@@ -6,23 +6,43 @@ from word2number import w2n
 class NLPProcessor:
     OLLAMA_MODEL = "phi35:latest"   # or "coder:latest" or "mini-coder:latest"
     OLLAMA_URL = "http://localhost:11434/api/generate"
+
+    # Column name mapping for common synonyms
+    COLUMN_MAPPING = {
+        "sales": "amount",
+        "revenue": "amount",
+        "price": "price",
+        "cost": "cost",
+        "quantity": "quantity",
+        "qty": "quantity"
+    }
+
+    # Date word to SQL interval mapping (simple)
+    DATE_KEYWORDS = {
+        "today": "CURRENT_DATE",
+        "yesterday": "CURRENT_DATE - 1",
+        "tomorrow": "CURRENT_DATE + 1",
+        "last week": "CURRENT_DATE - 7",
+        "last month": "CURRENT_DATE - 30",
+        "last year": "CURRENT_DATE - 365",
+        "now": "CURRENT_TIMESTAMP",
+        "current time": "CURRENT_TIMESTAMP",
+        "current_timestamp": "CURRENT_TIMESTAMP"
+    }
+
     def __init__(self, catalog):
         self.catalog = catalog
 
     def process(self, text: str) -> Optional[str]:
-        """Public method: try rule‑based, then LLM fallback."""
-        # First try rule‑based
         command = self._rule_based(text)
         if command:
             return command
-        # Optionally enable LLM fallback
         return self._llm_fallback(text)
-        # return None
 
     # ==================== Rule‑based processing ====================
     def _rule_based(self, text: str) -> Optional[str]:
         text = text.lower().strip()
-        # First, detect very specific patterns that override generic intents
+        # Specific patterns first
         if "create index" in text:
             return self._generate_create_index(text)
         if "drop index" in text:
@@ -131,36 +151,51 @@ class NLPProcessor:
             pass
         return []
 
+    def _map_column_name(self, col: str) -> str:
+        return self.COLUMN_MAPPING.get(col, col)
+
     # ---------- Column projection extraction ----------
     def _extract_columns(self, text: str) -> Optional[List[str]]:
-        """Extract specific column names from a phrase like 'show name, age from users'."""
-        # Patterns: "show name and age" or "show name, age" or "select name, age"
-        # The columns likely appear before the table name.
         table = self._extract_table(text)
         if not table:
             return None
-        # Find the part before the table name
         parts = text.split(table)
         if len(parts) < 2:
             return None
         before = parts[0]
-        # Look for words that are column names (known from schema) or common column names
         known_cols = self._get_column_names(table)
-        # Also include common generic column names
         common = ["id", "name", "age", "email", "city", "amount", "price", "quantity"]
         candidates = re.findall(r'\b([a-z_]+)\b', before)
-        # Filter candidates that are either known columns or common names
         cols = [c for c in candidates if c in known_cols or c in common]
         if cols:
-            return list(dict.fromkeys(cols))  # unique order preserved
+            return list(dict.fromkeys(cols))
         return None
 
     def _extract_distinct(self, text: str) -> bool:
         return "distinct" in text or "unique" in text
 
-    # ---------- Condition parsing (supports AND/OR, LIKE, BETWEEN, IN) ----------
+    # ---------- Condition parsing (enhanced with NOT, NULL, dates, OR, NOT BETWEEN) ----------
     def _extract_conditions(self, text: str) -> Optional[str]:
-        # First, handle special "with id" case
+        # Helper to convert date expressions
+        def parse_date_expression(expr: str) -> str:
+            expr = expr.strip()
+            for word, sql_expr in self.DATE_KEYWORDS.items():
+                if word in expr:
+                    return sql_expr
+            return f"'{expr}'"
+
+        # First, check for OR at the top level (simple split on " or ")
+        # We'll later combine with AND if OR is present
+        if " or " in text:
+            # Split on " or " but not inside parentheses (we'll assume simple for now)
+            parts = re.split(r'\s+or\s+', text)
+            if len(parts) > 1:
+                conds = [self._extract_conditions(p) for p in parts]
+                conds = [c for c in conds if c]
+                if conds:
+                    return " OR ".join(conds)
+
+        # Special "with id" case
         id_match = re.search(r"with\s+id\s+(\d+)", text)
         if id_match:
             value = id_match.group(1)
@@ -170,9 +205,29 @@ class NLPProcessor:
                 pass
             return f"id = {value}"
 
-        # Build list of conditions
         conditions = []
-        # 1. BETWEEN ... AND ...
+        # NULL handling
+        null_patterns = [
+            (r"(\w+)\s+is\s+(?:missing|empty|null)", r"\1 IS NULL"),
+            (r"(\w+)\s+is\s+not\s+(?:missing|empty|null)", r"\1 IS NOT NULL"),
+            (r"no\s+(\w+)", r"\1 IS NULL"),
+            (r"without\s+(\w+)", r"\1 IS NULL"),
+        ]
+        for pattern, repl in null_patterns:
+            match = re.search(pattern, text)
+            if match:
+                field = match.group(1)
+                conditions.append(re.sub(pattern, repl, match.group(0)).strip())
+
+        # NOT BETWEEN
+        not_between_match = re.search(r'(\w+)\s+not\s+between\s+(\d+)\s+and\s+(\d+)', text)
+        if not_between_match:
+            col = not_between_match.group(1)
+            low = not_between_match.group(2)
+            high = not_between_match.group(3)
+            conditions.append(f"{col} NOT BETWEEN {low} AND {high}")
+
+        # BETWEEN
         between_match = re.search(r'(\w+)\s+between\s+(\d+)\s+and\s+(\d+)', text)
         if between_match:
             col = between_match.group(1)
@@ -180,22 +235,45 @@ class NLPProcessor:
             high = between_match.group(3)
             conditions.append(f"{col} BETWEEN {low} AND {high}")
 
-        # 2. IN list: "in (1,2,3)" or "id in 1,2,3"
-        in_match = re.search(r'(\w+)\s+in\s+\(?([\d,\s]+)\)?', text)
+        # IN / NOT IN
+        in_match = re.search(r'(\w+)\s+(not\s+)?in\s+\(?([\d,\s]+)\)?', text)
         if in_match:
             col = in_match.group(1)
-            vals = [v.strip() for v in in_match.group(2).split(',')]
+            not_flag = in_match.group(2) is not None
+            vals = [v.strip() for v in in_match.group(3).split(',')]
             vals_str = ','.join(vals)
-            conditions.append(f"{col} IN ({vals_str})")
+            if not_flag:
+                conditions.append(f"{col} NOT IN ({vals_str})")
+            else:
+                conditions.append(f"{col} IN ({vals_str})")
 
-        # 3. LIKE: "name like 'A%'"
-        like_match = re.search(r'(\w+)\s+like\s+[\'"]?([^\'"]+)[\'"]?', text)
+        # LIKE / NOT LIKE
+        like_match = re.search(r'(\w+)\s+(not\s+)?like\s+[\'"]?([^\'"]+)[\'"]?', text)
         if like_match:
             col = like_match.group(1)
-            pattern = like_match.group(2)
-            conditions.append(f"{col} LIKE '{pattern}'")
+            not_flag = like_match.group(2) is not None
+            pattern = like_match.group(3)
+            if not_flag:
+                conditions.append(f"{col} NOT LIKE '{pattern}'")
+            else:
+                conditions.append(f"{col} LIKE '{pattern}'")
 
-        # 4. Standard comparisons (with explicit field)
+        # Date comparisons
+        date_match = re.search(r'(\w+)\s+(after|before)\s+([\d\-]+|\w+)', text)
+        if date_match:
+            col = date_match.group(1)
+            op = ">" if date_match.group(2) == "after" else "<"
+            date_expr = parse_date_expression(date_match.group(3))
+            conditions.append(f"{col} {op} {date_expr}")
+
+        between_date_match = re.search(r'(\w+)\s+between\s+([\d\-]+|\w+)\s+and\s+([\d\-]+|\w+)', text)
+        if between_date_match:
+            col = between_date_match.group(1)
+            d1 = parse_date_expression(between_date_match.group(2))
+            d2 = parse_date_expression(between_date_match.group(3))
+            conditions.append(f"{col} BETWEEN {d1} AND {d2}")
+
+        # Standard comparisons
         patterns = [
             (r"(\w+)\s+is\s+['\"]?([^'\"]+)['\"]?", r"\1 = '\2'"),
             (r"(\w+)\s+equal[s]?\s+to\s+['\"]?([^'\"]+)['\"]?", r"\1 = '\2'"),
@@ -205,6 +283,7 @@ class NLPProcessor:
             (r"(\w+)\s+younger\s+than\s+(\d+)", r"age < \2"),
             (r"(\w+)\s+with\s+id\s+(\d+)", r"id = \2"),
             (r"id\s+(\d+)", r"id = \1"),
+            (r"(\w+)\s+over\s+(\d+)", r"\1 > \2"),
         ]
         for pattern, repl in patterns:
             match = re.search(pattern, text)
@@ -224,15 +303,12 @@ class NLPProcessor:
                     val = match.group(1)
                     conditions.append(f"id = {val}")
 
-        # Combine with AND (we ignore OR for simplicity)
         if conditions:
             return " AND ".join(conditions)
         return None
 
     # ---------- JOIN detection ----------
     def _detect_join(self, text: str, table: str) -> Optional[Tuple[str, str, str]]:
-        """Return (join_type, other_table, condition) if a join is detected."""
-        # Look for phrases like "users and orders" or "users join orders"
         tables = self._get_known_tables()
         other_table = None
         for t in tables:
@@ -241,7 +317,7 @@ class NLPProcessor:
                 break
         if not other_table:
             return None
-        # Determine join type
+        join_type = "INNER"
         if "left join" in text or "left outer join" in text:
             join_type = "LEFT"
         elif "right join" in text or "right outer join" in text:
@@ -252,36 +328,34 @@ class NLPProcessor:
             join_type = "NATURAL"
         elif "cross join" in text:
             join_type = "CROSS"
-        else:
-            join_type = "INNER"
-        # Guess join condition (assume table.id = other_table.table_id or similar)
-        # Try to find explicit condition like "on table.id = other.id"
+        if re.search(r"even\s+if\s+no\s+\w+", text):
+            join_type = "LEFT"
         on_match = re.search(r'on\s+([\w.]+)\s*=\s*([\w.]+)', text)
         if on_match:
             cond = f"{on_match.group(1)} = {on_match.group(2)}"
         else:
-            # Default guess: primary key of first table is id, foreign key in second table is table_id
             cond = f"{table}.id = {other_table}.{table}_id"
         return (join_type, other_table, cond)
 
-    # ---------- Subquery detection ----------
+    # ---------- Subquery detection (with EXISTS) ----------
     def _detect_subquery(self, text: str, main_table: str) -> Optional[Tuple[str, str, str]]:
-        """Detect subquery patterns like 'users who bought' -> IN (SELECT user_id FROM orders)"""
-        # Look for "who bought" or "who purchased"
+        if re.search(r'\b(?:who|that)\s+(?:have|has|placed|made)\s+', text):
+            tables = self._get_known_tables()
+            for t in tables:
+                if t != main_table and re.search(rf'\b{t}\b', text):
+                    inner_table = t
+                    fk_col = f"{main_table}_id"
+                    return ("EXISTS", None, f"SELECT 1 FROM {inner_table} WHERE {inner_table}.{fk_col} = {main_table}.id")
         if re.search(r'\b(?:who|that)\s+(?:bought|purchased|ordered)', text):
-            # Assume subquery on orders table
             return ("IN", "id", f"SELECT user_id FROM orders")
-        # Generic: try to find a table that is not the main table and not already joined
         tables = self._get_known_tables()
         for t in tables:
             if t != main_table and re.search(rf'\b{t}\b', text):
-                # Guess a simple subquery
                 return ("IN", "id", f"SELECT {main_table}_id FROM {t}")
         return None
 
     # ---------- Aggregation detection ----------
     def _extract_aggregates(self, text: str) -> List[Tuple[str, str, str]]:
-        """Return list of (function, column, alias)."""
         agg_patterns = [
             (r"count\s+of\s+(\w+)", "COUNT"),
             (r"total\s+(\w+)", "SUM"),
@@ -296,9 +370,9 @@ class NLPProcessor:
             match = re.search(pattern, text)
             if match:
                 col = match.group(1)
+                col = self._map_column_name(col)
                 alias = f"{col}_{func.lower()}"
                 aggregates.append((func, col, alias))
-        # Also check for "*" count
         if "count of all" in text or "count of rows" in text:
             aggregates.append(("COUNT", "*", "total"))
         return aggregates
@@ -307,29 +381,50 @@ class NLPProcessor:
         group_match = re.search(r"group\s+by\s+(\w+)", text)
         if group_match:
             return group_match.group(1)
+        per_match = re.search(r"per\s+(\w+)", text)
+        if per_match:
+            return per_match.group(1)
         return None
 
     def _extract_having(self, text: str) -> Optional[str]:
         having_match = re.search(r"having\s+(.+?)(?:\s+order\s+by|\s+limit|$)", text)
         if having_match:
             cond = having_match.group(1).strip()
-            # Convert to SQL condition (simplistic)
             cond = re.sub(r'([a-z_]+)\s+is\s+', r'\1 = ', cond)
+            cond = re.sub(r'greater\s+than\s+(\d+)', r'> \1', cond)
+            cond = re.sub(r'less\s+than\s+(\d+)', r'< \1', cond)
             return cond
         return None
 
-    def _extract_order_by(self, text: str) -> Optional[Tuple[str, str]]:
-        order_match = re.search(r"order\s+by\s+(\w+)\s*(asc|desc)?", text)
-        if order_match:
-            col = order_match.group(1)
-            direction = order_match.group(2).upper() if order_match.group(2) else "ASC"
-            return (col, direction)
-        return None
+    # ---------- ORDER BY multiple columns ----------
+    def _extract_order_by(self, text: str) -> Optional[List[Tuple[str, str]]]:
+        order_match = re.search(r"order\s+by\s+(.+?)(?:\s+limit|\s+offset|$)", text)
+        if not order_match:
+            return None
+        order_part = order_match.group(1).strip()
+        parts = [p.strip() for p in order_part.split(',')]
+        order_specs = []
+        for part in parts:
+            m = re.match(r'^(\w+)\s*(asc|desc)?$', part, re.IGNORECASE)
+            if m:
+                col = m.group(1)
+                direction = m.group(2).upper() if m.group(2) else "ASC"
+                order_specs.append((col, direction))
+        return order_specs if order_specs else None
 
     def _extract_limit(self, text: str) -> Optional[int]:
+        # "top N" -> LIMIT N
+        top_match = re.search(r"top\s+(\d+)", text)
+        if top_match:
+            return int(top_match.group(1))
+        # "limit N" -> LIMIT N
         limit_match = re.search(r"limit\s+(\d+)", text)
         if limit_match:
             return int(limit_match.group(1))
+        # "fetch first N rows only" -> LIMIT N
+        fetch_match = re.search(r"fetch\s+first\s+(\d+)\s+rows?\s+only", text)
+        if fetch_match:
+            return int(fetch_match.group(1))
         return None
 
     def _extract_offset(self, text: str) -> Optional[int]:
@@ -338,12 +433,10 @@ class NLPProcessor:
 
     # ---------- NoSQL specific operators ----------
     def _detect_nosql_operator(self, text: str) -> Optional[Tuple[str, str, Any]]:
-        """For UPDATE, detect PUSH, PULL, ADDTOSET."""
         for op in ["push", "pull", "addtoset"]:
             match = re.search(rf"{op}\s+['\"]?(\w+)['\"]?", text)
             if match:
                 value = match.group(1)
-                # Try to parse as number if possible
                 try:
                     if value.isdigit():
                         value = int(value)
@@ -353,7 +446,6 @@ class NLPProcessor:
         return None
 
     def _detect_contains(self, text: str) -> Optional[Tuple[str, str]]:
-        """For NoSQL WHERE, detect CONTAINS."""
         match = re.search(r"contains\s+['\"]?(\w+)['\"]?", text)
         if match:
             return ("CONTAINS", match.group(1))
@@ -361,22 +453,21 @@ class NLPProcessor:
 
     # ---------- DDL operations ----------
     def _generate_create_index(self, text: str) -> Optional[str]:
-        # CREATE INDEX idx_name ON table (column)
-        match = re.search(r"create\s+index\s+(\w+)\s+on\s+(\w+)\s*\(?\s*(\w+)\s*\)?", text)
+        match = re.search(r"create\s+index\s+(\w+)\s+on\s+(\w+)\s*\(?\s*([\w, ]+)\s*\)?", text)
         if match:
             idx_name = match.group(1)
             table = match.group(2)
-            col = match.group(3)
-            # Determine SQL vs NoSQL
+            cols = match.group(3).strip()
+            col_list = [c.strip() for c in cols.split(',')]
+            col_str = ", ".join(col_list)
             if table in self._get_known_tables():
-                # Check if it's a SQL table
                 try:
                     sql_tables = list(self.catalog.get_current_sql_engine().storage.data["tables"].keys())
                     if table in sql_tables:
-                        return f"SQL CREATE INDEX {idx_name} ON {table} ({col})"
+                        return f"SQL CREATE INDEX {idx_name} ON {table} ({col_str})"
                 except:
                     pass
-                return f"NOSQL CREATE INDEX {idx_name} ON {table} ({col})"
+                return f"NOSQL CREATE INDEX {idx_name} ON {table} ({col_str})"
         return None
 
     def _generate_drop_index(self, text: str) -> Optional[str]:
@@ -403,16 +494,20 @@ class NLPProcessor:
         return None
 
     def _generate_alter_table(self, text: str) -> Optional[str]:
-        # Detect various ALTER operations
-        # ADD COLUMN
-        add_match = re.search(r"add\s+column\s+(\w+)\s+(\w+)", text)
+        add_match = re.search(r"add\s+column\s+(\w+)\s+(\w+)(?:\s+default\s+(.+))?", text)
         if add_match:
             col = add_match.group(1)
             typ = add_match.group(2).upper()
+            default_val = add_match.group(3) if add_match.group(3) else None
             table = self._extract_table(text)
             if table:
-                return f"SQL ALTER TABLE {table} ADD {col} {typ}"
-        # RENAME COLUMN
+                if default_val:
+                    # Check for CURRENT_TIMESTAMP
+                    if "current_timestamp" in default_val.lower():
+                        default_val = "CURRENT_TIMESTAMP"
+                    return f"SQL ALTER TABLE {table} ADD {col} {typ} DEFAULT {default_val}"
+                else:
+                    return f"SQL ALTER TABLE {table} ADD {col} {typ}"
         rename_match = re.search(r"rename\s+column\s+(\w+)\s+to\s+(\w+)", text)
         if rename_match:
             old = rename_match.group(1)
@@ -420,14 +515,12 @@ class NLPProcessor:
             table = self._extract_table(text)
             if table:
                 return f"SQL ALTER TABLE {table} RENAME COLUMN {old} TO {new}"
-        # DROP COLUMN
         drop_match = re.search(r"drop\s+column\s+(\w+)", text)
         if drop_match:
             col = drop_match.group(1)
             table = self._extract_table(text)
             if table:
                 return f"SQL ALTER TABLE {table} DROP COLUMN {col}"
-        # RENAME TABLE
         rename_table_match = re.search(r"rename\s+table\s+(\w+)\s+to\s+(\w+)", text)
         if rename_table_match:
             old = rename_table_match.group(1)
@@ -467,7 +560,6 @@ class NLPProcessor:
         return None
 
     def _generate_create_trigger(self, text: str) -> Optional[str]:
-        # Simplified: CREATE TRIGGER name BEFORE|AFTER INSERT|UPDATE|DELETE ON table FOR EACH ROW BEGIN ... END
         match = re.search(r"create\s+trigger\s+(\w+)\s+(before|after)\s+(insert|update|delete)\s+on\s+(\w+)\s+for\s+each\s+row\s+begin\s+(.+?)\s+end", text, re.DOTALL)
         if match:
             name = match.group(1)
@@ -485,10 +577,52 @@ class NLPProcessor:
             return f"SQL DROP TRIGGER {name}"
         return None
 
-    # ---------- SELECT generation (enhanced) ----------
+    # ---------- SELECT generation (enhanced with UNION, CTE, scalar subquery) ----------
     def _generate_select(self, text: str) -> str:
+        # Check for UNION / INTERSECT / EXCEPT
+        if " union " in text:
+            parts = re.split(r'\s+union\s+', text)
+            if len(parts) == 2:
+                left = self._generate_select(parts[0])
+                right = self._generate_select(parts[1])
+                left_clean = re.sub(r'^(SQL|NOSQL)\s+', '', left)
+                right_clean = re.sub(r'^(SQL|NOSQL)\s+', '', right)
+                prefix = "SQL" if left.startswith("SQL") else "NOSQL"
+                return f"{prefix} {left_clean} UNION {right_clean}"
+        if " intersect " in text:
+            parts = re.split(r'\s+intersect\s+', text)
+            if len(parts) == 2:
+                left = self._generate_select(parts[0])
+                right = self._generate_select(parts[1])
+                left_clean = re.sub(r'^(SQL|NOSQL)\s+', '', left)
+                right_clean = re.sub(r'^(SQL|NOSQL)\s+', '', right)
+                prefix = "SQL" if left.startswith("SQL") else "NOSQL"
+                return f"{prefix} {left_clean} INTERSECT {right_clean}"
+        if " except " in text:
+            parts = re.split(r'\s+except\s+', text)
+            if len(parts) == 2:
+                left = self._generate_select(parts[0])
+                right = self._generate_select(parts[1])
+                left_clean = re.sub(r'^(SQL|NOSQL)\s+', '', left)
+                right_clean = re.sub(r'^(SQL|NOSQL)\s+', '', right)
+                prefix = "SQL" if left.startswith("SQL") else "NOSQL"
+                return f"{prefix} {left_clean} EXCEPT {right_clean}"
+
+        # Check for WITH (CTE)
+        with_match = re.search(r'^with\s+(\w+)\s+as\s+\((.+?)\)\s+(select\s+.+)$', text, re.DOTALL)
+        if with_match:
+            cte_name = with_match.group(1)
+            cte_query = with_match.group(2).strip()
+            main_query = with_match.group(3).strip()
+            inner_cmd = self._generate_select(cte_query)
+            inner_clean = re.sub(r'^(SQL|NOSQL)\s+', '', inner_cmd)
+            main_cmd = self._generate_select(main_query)
+            main_clean = re.sub(r'^(SQL|NOSQL)\s+', '', main_cmd)
+            prefix = "SQL" if inner_cmd.startswith("SQL") else "NOSQL"
+            return f"{prefix} WITH {cte_name} AS ({inner_clean}) {main_clean}"
+
+        # Normal processing
         table = self._extract_table(text) or "users"
-        # Determine SQL vs NoSQL
         sql_tables = []
         try:
             sql_tables = list(self.catalog.get_current_sql_engine().storage.data["tables"].keys())
@@ -496,47 +630,98 @@ class NLPProcessor:
             pass
         prefix = "SQL" if table in sql_tables else "NOSQL"
 
-        # Check for join
+        # ----- Scalar subquery detection in SELECT list -----
+        # We need to parse the column list and find items like "(select ...) as alias"
+        # We'll first extract the SELECT clause from the original text
+        select_clause_original = ""
+        select_match_orig = re.search(r'select\s+(.+?)\s+from', text, re.IGNORECASE | re.DOTALL)
+        if select_match_orig:
+            select_clause_original = select_match_orig.group(1).strip()
+        scalar_subqueries = []
+        columns_clean = []
+        if select_clause_original and select_clause_original != "*":
+            # Split columns by commas not inside parentheses
+            cols = []
+            depth = 0
+            current = []
+            for ch in select_clause_original:
+                if ch == '(':
+                    depth += 1
+                elif ch == ')':
+                    depth -= 1
+                elif ch == ',' and depth == 0:
+                    cols.append(''.join(current).strip())
+                    current = []
+                    continue
+                current.append(ch)
+            if current:
+                cols.append(''.join(current).strip())
+            for col in cols:
+                # Check if column starts with '(' and contains SELECT
+                if col.startswith('(') and 'select' in col.lower():
+                    # Extract subquery and alias
+                    # Pattern: (SELECT ... ) AS alias
+                    sub_match = re.match(r'\(\s*(select.+?)\s*\)\s+(?:as\s+)?(\w+)', col, re.IGNORECASE | re.DOTALL)
+                    if sub_match:
+                        inner_sql = sub_match.group(1).strip()
+                        alias = sub_match.group(2)
+                        scalar_subqueries.append((alias, inner_sql))
+                        columns_clean.append(alias)
+                    else:
+                        # No alias? Assume whole column is subquery, not valid
+                        columns_clean.append(col)
+                else:
+                    columns_clean.append(col)
+        else:
+            columns_clean = ["*"]
+
+        # Now use the cleaned column list in the rest of the generation
+        # We'll store the scalar subqueries for later attachment
+        # For simplicity, we'll generate the command as usual, then replace the column list with the original? Better to integrate.
+
+        # Continue with normal processing, but later we will inject the scalar subquery into the SELECT clause
+        # We'll use the `columns_clean` as the selected columns (which may contain aliases from subqueries)
+
+        # For joins, subqueries, etc., we keep the original logic (but we'll adjust the final SELECT clause)
+        # First, detect join or subquery as before
         join_info = self._detect_join(text, table)
         if join_info:
             join_type, other_table, join_cond = join_info
-            # For simplicity, we'll generate a SELECT with the join
-            # The FROM clause will include the join
             from_clause = f"{table} {join_type} JOIN {other_table} ON {join_cond}"
-            # We'll reconstruct the whole command
             command = f"{prefix} SELECT * FROM {from_clause}"
-            # Add WHERE, ORDER BY, LIMIT later if needed
             where_cond = self._extract_conditions(text)
             if where_cond:
                 command += f" WHERE {where_cond}"
             order_by = self._extract_order_by(text)
             if order_by:
-                col, direction = order_by
-                command += f" ORDER BY {col} {direction}"
+                order_str = ", ".join(f"{col} {dir}" for col, dir in order_by)
+                command += f" ORDER BY {order_str}"
             limit = self._extract_limit(text)
             if limit:
                 command += f" LIMIT {limit}"
             return command
 
-        # Check for subquery
         subquery_info = self._detect_subquery(text, table)
         if subquery_info:
             sub_type, outer_col, inner_sql = subquery_info
             if sub_type == "IN":
                 where_cond = f"{outer_col} IN ({inner_sql})"
                 command = f"{prefix} SELECT * FROM {table} WHERE {where_cond}"
-                # Add other clauses
-                order_by = self._extract_order_by(text)
-                if order_by:
-                    col, direction = order_by
-                    command += f" ORDER BY {col} {direction}"
-                limit = self._extract_limit(text)
-                if limit:
-                    command += f" LIMIT {limit}"
-                return command
+            elif sub_type == "EXISTS":
+                where_cond = f"EXISTS ({inner_sql})"
+                command = f"{prefix} SELECT * FROM {table} WHERE {where_cond}"
+            else:
+                command = f"{prefix} SELECT * FROM {table}"
+            order_by = self._extract_order_by(text)
+            if order_by:
+                order_str = ", ".join(f"{col} {dir}" for col, dir in order_by)
+                command += f" ORDER BY {order_str}"
+            limit = self._extract_limit(text)
+            if limit:
+                command += f" LIMIT {limit}"
+            return command
 
         # Regular SELECT
-        # Extract columns
         columns = self._extract_columns(text)
         distinct = self._extract_distinct(text)
         select_clause = "*"
@@ -548,7 +733,24 @@ class NLPProcessor:
             if distinct:
                 select_clause = "DISTINCT *"
 
-        # Extract aggregates (multiple)
+        # If we have scalar subqueries, we need to build a different select clause
+        if scalar_subqueries:
+            # Build select clause: regular columns + subquery aliases
+            select_parts = []
+            # Add regular columns (those in columns_clean that are not aliases from subqueries)
+            for col in columns_clean:
+                if col not in [a for a, _ in scalar_subqueries]:
+                    select_parts.append(col)
+            # Add subquery aliases
+            for alias, _ in scalar_subqueries:
+                select_parts.append(alias)
+            select_clause = ", ".join(select_parts)
+            # We will need to attach the subquery values later? No, we are generating the SQL with the subquery inline.
+            # The column expression should be the original subquery text.
+            # So we need to rebuild the select clause with the original subquery expression, not just alias.
+            # Let's reconstruct from original `cols`
+            select_clause = ", ".join(cols) if cols else "*"
+
         aggregates = self._extract_aggregates(text)
         group_by = self._extract_group_by(text)
         if aggregates:
@@ -562,35 +764,38 @@ class NLPProcessor:
             if group_by:
                 select_clause += f", {group_by}"
         elif group_by:
-            # No aggregates but GROUP BY – we need to include group_by column
             if columns:
                 select_clause = ", ".join(columns)
             else:
                 select_clause = group_by
 
-        # Build command
         command = f"{prefix} SELECT {select_clause} FROM {table}"
 
-        # WHERE
         where_cond = self._extract_conditions(text)
         if where_cond:
             command += f" WHERE {where_cond}"
 
-        # GROUP BY
         if group_by:
             command += f" GROUP BY {group_by}"
-            # HAVING
             having = self._extract_having(text)
             if having:
                 command += f" HAVING {having}"
 
-        # ORDER BY
         order_by = self._extract_order_by(text)
         if order_by:
-            col, direction = order_by
-            command += f" ORDER BY {col} {direction}"
+            order_str = ", ".join(f"{col} {dir}" for col, dir in order_by)
+            command += f" ORDER BY {order_str}"
+        else:
+            top = self._extract_limit(text)
+            if top:
+                if aggregates:
+                    order_col = aggregates[0][1]
+                elif columns:
+                    order_col = columns[0]
+                else:
+                    order_col = "id"
+                command += f" ORDER BY {order_col} DESC"
 
-        # LIMIT
         limit = self._extract_limit(text)
         offset = self._extract_offset(text)
         if limit:
@@ -601,16 +806,16 @@ class NLPProcessor:
 
         return command
 
-    # ---------- INSERT generation (enhanced) ----------
+    # ---------- INSERT, UPDATE, DELETE (unchanged, but with NOW handling) ----------
     def _generate_insert(self, text: str) -> str:
         table = self._extract_table(text) or "users"
-        # Try to extract column-value pairs from phrases like "name Alice age 30"
         pairs = {}
-        # Look for "name = value" or "name is value"
+        # Look for "now" or "current_timestamp" as a value
+        if "now" in text or "current timestamp" in text:
+            pairs["created_at"] = "CURRENT_TIMESTAMP"
         for match in re.finditer(r'(\w+)\s+(?:is|=)\s+[\'"]?(\w+)[\'"]?', text):
             col, val = match.group(1), match.group(2)
             pairs[col] = val
-        # Also look for "named Alice age 30"
         name_match = re.search(r'named?\s+[\'"]?(\w+)[\'"]?', text)
         if name_match and "name" not in pairs:
             pairs["name"] = name_match.group(1)
@@ -619,19 +824,23 @@ class NLPProcessor:
             pairs["age"] = age_match.group(1)
         if pairs:
             cols = list(pairs.keys())
-            vals = [f"'{v}'" if not v.isdigit() else v for v in pairs.values()]
+            vals = []
+            for v in pairs.values():
+                if v == "CURRENT_TIMESTAMP":
+                    vals.append("CURRENT_TIMESTAMP")
+                elif isinstance(v, str) and not v.isdigit():
+                    vals.append(f"'{v}'")
+                else:
+                    vals.append(str(v))
             return f"SQL INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join(vals)})"
         else:
             return f"SQL INSERT INTO {table} DEFAULT VALUES"
 
-    # ---------- UPDATE generation (enhanced) ----------
     def _generate_update(self, text: str) -> str:
         table = self._extract_table(text) or "users"
-        # Detect NoSQL operator (PUSH, PULL, ADDTOSET)
         nosql_op = self._detect_nosql_operator(text)
         if nosql_op:
             op, val = nosql_op
-            # Determine which field to update
             field_match = re.search(r'(\w+)\s+(?:push|pull|addtoset)', text)
             if field_match:
                 field = field_match.group(1)
@@ -640,13 +849,11 @@ class NLPProcessor:
                 return f"NOSQL UPDATE {table} SET {field} {op} {val}{condition_part}"
             else:
                 return f"NOSQL UPDATE {table}"
-        # Normal SQL update
         set_pairs = []
-        # Look for "set age 31" or "age = 31"
         set_matches = re.finditer(r'(\w+)\s+(?:to|=)?\s+[\'"]?(\w+)[\'"]?', text)
         for match in set_matches:
             col, val = match.group(1), match.group(2)
-            if col in ["name", "age", "id", "status"]:  # common columns
+            if col in ["name", "age", "id", "status"]:
                 set_pairs.append(f"{col} = '{val}'" if not val.isdigit() else f"{col} = {val}")
         if set_pairs:
             condition = self._extract_conditions(text)
@@ -654,7 +861,6 @@ class NLPProcessor:
             return f"SQL UPDATE {table} SET {', '.join(set_pairs)}{condition_part}"
         return f"SQL UPDATE {table}"
 
-    # ---------- DELETE generation (enhanced) ----------
     def _generate_delete(self, text: str) -> str:
         table = self._extract_table(text) or "users"
         condition = self._extract_conditions(text)
@@ -692,6 +898,7 @@ class NLPProcessor:
             return f"NOSQL DROP COLLECTION {coll}"
         return None
 
+    # ---------- LLM fallback ----------
     def _llm_fallback(self, text: str) -> Optional[str]:
         prompt = f"""You are a database assistant. Convert the following user request into a SQL or NoSQL command.
 The command must start with either "SQL" or "NOSQL".
