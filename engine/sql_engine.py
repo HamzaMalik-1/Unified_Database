@@ -40,6 +40,35 @@ class SQLDatabase:
                 if result.startswith("Error:"):
                     return ResponseFactory.error(result, status=400)
                 return ResponseFactory.text(result)
+            # ----- CTE (WITH) support -----
+            elif cmd_upper.startswith("WITH"):
+                result_str = self._execute_with(command)
+                if result_str.startswith("Error:"):
+                    return ResponseFactory.error(result_str, status=400)
+                try:
+                    rows = json.loads(result_str)
+                    if isinstance(rows, list) and rows and all(isinstance(r, dict) for r in rows):
+                        return ResponseFactory.table(rows, message="Query executed successfully")
+                    else:
+                        return ResponseFactory.json(rows, message="Query executed successfully")
+                except:
+                    return ResponseFactory.text(result_str, message="Query executed successfully")
+            
+            # Check for set operations (UNION, INTERSECT, EXCEPT) before normal SELECT
+            elif cmd_upper.startswith("SELECT") and any(kw in cmd_upper for kw in ('UNION', 'INTERSECT', 'EXCEPT')):
+                result_str = self._execute_set_operation(command)
+                if result_str.startswith("Error:"):
+                    return ResponseFactory.error(result_str, status=400)
+                try:
+                    rows = json.loads(result_str)
+                    if isinstance(rows, list) and rows and all(isinstance(r, dict) for r in rows):
+                        return ResponseFactory.table(rows, message="Query executed successfully")
+                    else:
+                        return ResponseFactory.json(rows, message="Query executed successfully")
+                except:
+                    return ResponseFactory.text(result_str, message="Query executed successfully")
+            
+            
             elif cmd_upper.startswith("INSERT INTO") and "SELECT" in cmd_upper and "FROM NOSQL" in cmd_upper:
                 result = self._insert_from_nosql(command)
                 if result.startswith("Error:"):
@@ -254,16 +283,83 @@ class SQLDatabase:
             logger.error(f"INSERT failed: {e}")
             return f"Error: {e}"
            
-    def _evaluate_condition(self, row: Dict, condition_str: str) -> bool:
+    def _evaluate_condition(self, doc: Dict, condition_str: str) -> bool:
         if not condition_str:
             return True
+
         cond = condition_str.strip()
-        cond = re.sub(r'(?<![<>!=])=(?![=])', '==', cond)
-        try:
-            result = eval(cond, {"__builtins__": {}}, row)
-            return bool(result)
-        except Exception as e:
-            logger.error(f"Condition evaluation failed: {cond} -> {e}")
+
+        # ----- CONTAINS operator (whole word matching, case‑insensitive) -----
+        contains_match = re.match(r'^([\w.]+)\s+CONTAINS\s+(.+)$', cond, re.IGNORECASE)
+        if contains_match:
+            field = contains_match.group(1).strip()
+            right_raw = contains_match.group(2).strip()
+            # Extract the search word (strip quotes if present)
+            if right_raw.startswith("'") and right_raw.endswith("'"):
+                search_word = right_raw[1:-1]
+            else:
+                search_word = right_raw
+
+            left_val = self._get_nested(doc, field)
+            if left_val is None:
+                return False
+
+            # Escape regex special characters and match whole word, case‑insensitive
+            escaped_word = re.escape(search_word)
+            word_pattern = re.compile(rf'\b{escaped_word}\b', re.IGNORECASE)
+
+            if isinstance(left_val, list):
+                for item in left_val:
+                    if isinstance(item, str):
+                        if word_pattern.search(item):
+                            return True
+                    elif item == search_word:   # non‑string exact match
+                        return True
+                return False
+            elif isinstance(left_val, str):
+                return bool(word_pattern.search(left_val))
+            else:
+                # Non‑string values: only exact match
+                return left_val == search_word
+
+        # ----- Standard comparison operators -----
+        match = re.match(r'^([\w.]+)\s*([=<>!]+)\s*(.+)$', cond)
+        if not match:
+            return False
+
+        field = match.group(1).strip()
+        operator = match.group(2).strip()
+        right_raw = match.group(3).strip()
+
+        # Parse the right‑hand value (string, number, or null)
+        if right_raw.startswith("'") and right_raw.endswith("'"):
+            right_val = right_raw[1:-1]
+        elif right_raw.upper() == "NULL":
+            right_val = None
+        elif right_raw.isdigit():
+            right_val = int(right_raw)
+        else:
+            try:
+                right_val = float(right_raw)
+            except:
+                right_val = right_raw
+
+        left_val = self._get_nested(doc, field)
+
+        # Apply operator
+        if operator == "=" or operator == "==":
+            return left_val == right_val
+        elif operator == "!=":
+            return left_val != right_val
+        elif operator == ">":
+            return left_val > right_val
+        elif operator == "<":
+            return left_val < right_val
+        elif operator == ">=":
+            return left_val >= right_val
+        elif operator == "<=":
+            return left_val <= right_val
+        else:
             return False
 
     def _apply_aggregates(self, rows: List[Dict], group_col: str, agg_specs: Dict[str, str]) -> List[Dict]:
@@ -330,6 +426,11 @@ class SQLDatabase:
             group_by = parsed["group_by"]
             having_cond = parsed["having"]
             columns_spec = parsed["columns"]
+            distinct = parsed.get("distinct", False)
+
+            # Fallback: if DISTINCT appears in the original SQL but flag is missing, force it
+            if not distinct and " DISTINCT " in sql.upper():
+                distinct = True
 
             # ---------- View expansion ----------
             is_view = False
@@ -337,17 +438,14 @@ class SQLDatabase:
                 if depth > 5:
                     return "Error: View recursion depth exceeded (possible circular reference?)"
                 view_query = self.storage.data['views'][main_table]
-                # Execute the view query recursively
                 view_result_str = self._select(view_query, depth + 1)
                 if view_result_str.startswith("Error:"):
                     return view_result_str
                 rows = json.loads(view_result_str)
                 is_view = True
             else:
-                # Check if the table exists
                 if not self.storage.get_schema(main_table):
                     return f"Error: Table or view '{main_table}' does not exist"
-                # Normal table processing
                 rows = self.storage.get_table_data(main_table)
                 if not rows:
                     rows = []
@@ -358,9 +456,8 @@ class SQLDatabase:
                     rows = self._join_rows(rows, right_rows, join_type, condition)
                 if not rows:
                     return "[]"
-            # ------------------------------------------------------------
 
-            # ----- Index usage (only for single table, no joins, no group by, and not a view) -----
+            # ----- Index usage -----
             if where_cond and not joins and not group_by and not is_view:
                 index_info = self._find_index_for_condition(main_table, where_cond)
                 if index_info:
@@ -461,36 +558,23 @@ class SQLDatabase:
                         logger.error(f"Subquery execution failed: {e}")
                         return f"Error in subquery: {e}"
 
-            # ----- correlated EXISTS -----
-            if where_cond and "EXISTS (SELECT" in where_cond.upper():
-                pattern = r"EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+(\w+)\s+WHERE\s+(\w+)\.(\w+)\s*=\s*(\w+)\.(\w+)\s*\)"
-                match = re.search(pattern, where_cond, re.IGNORECASE | re.DOTALL)
+                    # ----- correlated EXISTS / NOT EXISTS -----
+            if where_cond and re.search(r'\b(NOT\s+)?EXISTS\s*\(', where_cond, re.IGNORECASE):
+                # Find the first EXISTS (or NOT EXISTS) pattern
+                exists_pattern = r'(\bNOT\s+)?EXISTS\s*\(\s*(SELECT\s+.+?)\s*\)'
+                match = re.search(exists_pattern, where_cond, re.IGNORECASE | re.DOTALL)
                 if match:
-                    inner_table = match.group(1)
-                    inner_col = match.group(3)
-                    outer_table = match.group(4)
-                    outer_col = match.group(5)
-                    inner_rows = self.storage.get_table_data(inner_table)
-                    matching_values = {r.get(inner_col) for r in inner_rows if r.get(inner_col) is not None}
-                    rows = [r for r in rows if r.get(outer_col) in matching_values]
-                    where_cond = None
-                else:
-                    pattern_generic = r"EXISTS\s*\(\s*(SELECT\s+.+?)\s*\)"
-                    match_gen = re.search(pattern_generic, where_cond, re.IGNORECASE | re.DOTALL)
-                    if match_gen:
-                        inner_sql = match_gen.group(1).strip()
-                        filtered_rows = []
-                        for row in rows:
-                            modified_inner = inner_sql
-                            for col_name, col_val in row.items():
-                                modified_inner = re.sub(rf'{main_table}\.{col_name}', str(col_val), modified_inner, flags=re.IGNORECASE)
-                            try:
-                                if self._execute_select_to_rows(modified_inner, depth+1):
-                                    filtered_rows.append(row)
-                            except Exception:
-                                pass
-                        rows = filtered_rows
-                        where_cond = None
+                    not_flag = match.group(1) is not None
+                    subquery_sql = match.group(2).strip()
+                    filtered_rows = []
+                    for row in rows:
+                        exists = self._evaluate_exists(subquery_sql, row, main_table, depth)
+                        if not_flag:
+                            exists = not exists
+                        if exists:
+                            filtered_rows.append(row)
+                    rows = filtered_rows
+                    where_cond = None   # Remove the condition because it has been applied
 
             # Apply WHERE
             if where_cond:
@@ -565,6 +649,28 @@ class SQLDatabase:
                             row_result[alias] = result
                         rows = [row_result]
 
+            # ========== FINAL COLUMN PROJECTION ==========
+            # (apply only if there is no GROUP BY and no aggregate functions)
+            if final_columns != "*" and not group_by and not agg_specs:
+                out_cols = final_columns
+                projected_rows = []
+                for row in rows:
+                    new_row = {col: row.get(col) for col in out_cols}
+                    projected_rows.append(new_row)
+                rows = projected_rows
+
+            # ========== DISTINCT (remove duplicate rows based on projected columns) ==========
+            if distinct:
+                seen = set()
+                unique_rows = []
+                for row in rows:
+                    # Use sorted items to make row hashable and order-independent
+                    row_tuple = tuple(sorted(row.items()))
+                    if row_tuple not in seen:
+                        seen.add(row_tuple)
+                        unique_rows.append(row)
+                rows = unique_rows
+
             # ORDER BY
             if order_by:
                 col, direction = order_by
@@ -577,21 +683,11 @@ class SQLDatabase:
                 start = offset if offset is not None else 0
                 rows = rows[start:start+limit_val]
 
-            # Column selection (final)
-            if final_columns != "*" and not group_by and not agg_specs:
-                out_cols = final_columns
-                result_rows = []
-                for row in rows:
-                    new_row = {col: row.get(col) for col in out_cols}
-                    result_rows.append(new_row)
-                rows = result_rows
-
             return json.dumps(rows, indent=2, default=str)
 
         except Exception as e:
             logger.error(f"SELECT failed: {e}")
             return f"Error: {e}"
-        
             
     def _update(self, sql: str) -> str:
         try:
@@ -1382,6 +1478,7 @@ class SQLDatabase:
     def _insert_from_nosql(self, sql: str) -> str:
         """
         Parses: INSERT INTO table (col1, col2, ...) SELECT col1, col2, ... FROM NOSQL (nosql_select_command)
+        Optimized for bulk insert: collects all rows, then appends once.
         """
         try:
             # Pattern: INSERT INTO table (cols) SELECT cols FROM NOSQL (subquery)
@@ -1400,7 +1497,7 @@ class SQLDatabase:
             if len(target_cols) != len(select_cols):
                 return f"Error: Number of target columns ({len(target_cols)}) does not match number of selected columns ({len(select_cols)})"
 
-            # Execute NoSQL subquery
+            # Execute NoSQL subquery once
             if not self.nosql_engine:
                 return "Error: NoSQL engine not available"
             nosql_resp = self.nosql_engine.execute(nosql_subquery)
@@ -1419,36 +1516,101 @@ class SQLDatabase:
             else:
                 return "Error: NoSQL subquery did not return a list of documents"
 
-            # For each document, build a row and insert
-            inserted = 0
+            # Get target table schema and existing rows
             schema = self.storage.get_schema(table_name)
             if not schema:
                 return f"Error: Table '{table_name}' does not exist"
 
+            existing_rows = self.storage.get_table_data(table_name)
+            new_rows = []
+            inserted_count = 0
+
+            # For each document, build a row dictionary (value validation, constraints, triggers)
             for doc in documents:
-                # Build value dict mapping target column to value from document (using selected column name as key)
+                # Build value dict from document using selected column paths
                 value_dict = {}
                 for tcol, scol in zip(target_cols, select_cols):
-                    # The selected column may be a field path (e.g., "address.city")
-                    # We need to get nested value from document
                     val = self._get_nested_nosql(doc, scol)
                     value_dict[tcol] = val
-                # Build row using existing _insert logic? We'll reuse the row building logic but we need to bypass normal INSERT parsing.
-                # Simpler: create a temporary INSERT statement for each row? That would be inefficient.
-                # Instead, we directly build a row dict and append to table data, after checking constraints, foreign keys, triggers.
-                # We'll replicate the row building logic from _insert but use value_dict.
-                # Let's reuse the existing _insert method by constructing a fake INSERT statement.
-                # But that would be inefficient and might cause parsing overhead. For simplicity, we'll call _insert with a constructed command.
-                # However, _insert expects a full INSERT command string. We'll build one:
-                vals_str = ','.join(self._quote_value(value_dict[tcol]) for tcol in target_cols)
-                cols_str = ','.join(target_cols)
-                insert_sql = f"INSERT INTO {table_name} ({cols_str}) VALUES ({vals_str})"
-                result = self._insert(insert_sql)
-                if result.startswith("Error:"):
-                    return result
-                inserted += 1
 
-            return f"Insert successful. {inserted} row(s) inserted."
+                # Build the row (replicating _insert logic without writing to storage yet)
+                row = {}
+                for col_def in schema:
+                    col_name = col_def["name"]
+                    col_type = col_def["type"]
+                    constraints = col_def["constraints"]
+                    val = value_dict.get(col_name, None)
+
+                    # Auto‑increment handling
+                    if col_def.get('auto_increment'):
+                        if val is None:
+                            counter = self.storage.data['auto_increment'].get(table_name, 0) + 1
+                            self.storage.data['auto_increment'][table_name] = counter
+                            typed_val = counter
+                        else:
+                            try:
+                                user_val = int(val)
+                            except (ValueError, TypeError):
+                                return f"Error: Invalid integer for auto‑increment column '{col_name}'"
+                            current = self.storage.data['auto_increment'].get(table_name, 0)
+                            if user_val > current:
+                                self.storage.data['auto_increment'][table_name] = user_val
+                            typed_val = user_val
+                    else:
+                        if val is None and col_def.get("default") is not None:
+                            default_val = col_def["default"]
+                            try:
+                                typed_val = DataType.validate(default_val, col_type)
+                            except:
+                                typed_val = default_val
+                        else:
+                            try:
+                                typed_val = DataType.validate(val, col_type) if val is not None else None
+                            except ValueError as e:
+                                return f"Error in column '{col_name}': {e}"
+
+                    # Constraints
+                    if "NOT NULL" in constraints and typed_val is None:
+                        return f"Error: Column '{col_name}' cannot be NULL"
+                    if "PRIMARY KEY" in constraints:
+                        try:
+                            # Check against existing_rows + already built new_rows
+                            SQLConstraint.check_primary_key(typed_val, col_name, existing_rows + new_rows, len(existing_rows) + len(new_rows))
+                        except ValueError as e:
+                            return f"Error: {e}"
+                    if "UNIQUE" in constraints and "PRIMARY KEY" not in constraints:
+                        try:
+                            SQLConstraint.check_unique(typed_val, col_name, existing_rows + new_rows, len(existing_rows) + len(new_rows))
+                        except ValueError as e:
+                            return f"Error: {e}"
+                    row[col_name] = typed_val
+
+                # CHECK constraints and foreign keys
+                error = self._check_constraints(table_name, row)
+                if error:
+                    return error
+                for col_name, col_val in row.items():
+                    if not self._check_parent_exists(table_name, col_name, col_val):
+                        return f"Error: Foreign key violation on {col_name}: value {col_val} not found"
+
+                # Fire BEFORE INSERT trigger (per row)
+                self._fire_triggers(table_name, "BEFORE", "INSERT", new_row=row)
+
+                new_rows.append(row)
+                inserted_count += 1
+
+            # Bulk append all new rows
+            existing_rows.extend(new_rows)
+            self.storage.set_table_data(table_name, existing_rows)
+            self.storage.save()
+
+            # Fire AFTER INSERT triggers for each inserted row
+            for row in new_rows:
+                self._fire_triggers(table_name, "AFTER", "INSERT", new_row=row)
+
+            logger.info(f"Bulk inserted {inserted_count} row(s) into '{table_name}' from NoSQL")
+            return f"Insert successful. {inserted_count} row(s) inserted."
+
         except Exception as e:
             logger.error(f"INSERT FROM NOSQL failed: {e}")
             return f"Error: {e}"
@@ -1520,3 +1682,235 @@ class SQLDatabase:
     def get_schema(self, table_name: str):
         """Return schema (columns) for a table, or None if table does not exist."""
         return self.storage.get_schema(table_name)
+    
+    
+    def _execute_set_operation(self, sql: str, depth: int = 0) -> str:
+        """
+        Execute a set operation (UNION, INTERSECT, EXCEPT) and return JSON result.
+        Handles simple top-level operation without parentheses.
+        Also supports literal SELECTs without FROM.
+        """
+        sql_upper = sql.upper()
+        depth_paren = 0
+        op_pos = -1
+        op_type = None
+        for i, ch in enumerate(sql):
+            if ch == '(':
+                depth_paren += 1
+            elif ch == ')':
+                depth_paren -= 1
+            elif depth_paren == 0:
+                if sql_upper[i:i+5] == 'UNION':
+                    op_pos = i
+                    op_type = 'UNION'
+                    break
+                elif sql_upper[i:i+9] == 'INTERSECT':
+                    op_pos = i
+                    op_type = 'INTERSECT'
+                    break
+                elif sql_upper[i:i+6] == 'EXCEPT':
+                    op_pos = i
+                    op_type = 'EXCEPT'
+                    break
+        if op_pos == -1:
+            return self._select(sql, depth)
+
+        left_sql = sql[:op_pos].strip()
+        right_sql = sql[op_pos + len(op_type):].strip()
+
+        # Remove any leading 'SQL ' or 'NOSQL ' (just in case)
+        for prefix in ('SQL ', 'NOSQL '):
+            if left_sql.upper().startswith(prefix):
+                left_sql = left_sql[len(prefix):].strip()
+            if right_sql.upper().startswith(prefix):
+                right_sql = right_sql[len(prefix):].strip()
+
+        # Helper to execute a subquery (handles literal SELECTs)
+        def execute_subquery(sub_sql: str) -> str:
+            sub_upper = sub_sql.upper()
+            # If it's a SELECT without FROM, treat as literal
+            if sub_upper.startswith('SELECT') and ' FROM ' not in sub_upper:
+                return self._execute_literal_select(sub_sql)
+            # Otherwise use normal set-operation or SELECT
+            if any(kw in sub_upper for kw in ('UNION', 'INTERSECT', 'EXCEPT')):
+                return self._execute_set_operation(sub_sql, depth + 1)
+            else:
+                return self._select(sub_sql, depth + 1)
+
+        left_result_str = execute_subquery(left_sql)
+        right_result_str = execute_subquery(right_sql)
+
+        if left_result_str.startswith("Error:") or right_result_str.startswith("Error:"):
+            return f"Error in set operation: {left_result_str} {right_result_str}"
+
+        left_rows = json.loads(left_result_str)
+        right_rows = json.loads(right_result_str)
+
+        if op_type == 'UNION':
+            combined = left_rows + right_rows
+            unique = []
+            seen = set()
+            for row in combined:
+                row_tuple = tuple(sorted(row.items()))
+                if row_tuple not in seen:
+                    seen.add(row_tuple)
+                    unique.append(row)
+            rows = unique
+        elif op_type == 'INTERSECT':
+            right_set = {tuple(sorted(row.items())) for row in right_rows}
+            rows = [row for row in left_rows if tuple(sorted(row.items())) in right_set]
+        elif op_type == 'EXCEPT':
+            right_set = {tuple(sorted(row.items())) for row in right_rows}
+            rows = [row for row in left_rows if tuple(sorted(row.items())) not in right_set]
+        else:
+            return f"Error: Unsupported set operation {op_type}"
+
+        return json.dumps(rows, indent=2, default=str)
+
+
+
+    def _execute_literal_select(self, sql: str) -> str:
+        """
+        Execute a SELECT without FROM (e.g., SELECT 'Alice' AS name).
+        Returns a JSON string with a single row.
+        """
+        sql = sql.strip()
+        if not sql.upper().startswith("SELECT"):
+            return "Error: Not a SELECT statement"
+        rest = sql[6:].strip()
+        parts = [p.strip() for p in rest.split(',')]
+        row = {}
+        for part in parts:
+            alias = None
+            if ' AS ' in part.upper():
+                expr, alias = part.split(' AS ', 1)
+                expr = expr.strip()
+                alias = alias.strip()
+            else:
+                expr = part
+                alias = None
+            # Evaluate literal
+            if expr.startswith("'") and expr.endswith("'"):
+                val = expr[1:-1]
+            elif expr.isdigit():
+                val = int(expr)
+            else:
+                try:
+                    val = float(expr)
+                except ValueError:
+                    val = expr
+            if alias:
+                row[alias] = val
+            else:
+                # Use expression as column name (fallback)
+                row[expr] = val
+        return json.dumps([row], indent=2)
+        
+    def _execute_with(self, sql: str, depth: int = 0) -> str:
+        """
+        Execute a WITH (CTE) query.
+        Example: WITH cte AS (SELECT ...) SELECT ...
+        Returns JSON string.
+        """
+        import re
+        sql = sql.strip()
+        if not sql.upper().startswith("WITH"):
+            return self._select(sql, depth)
+        
+        # Remove 'WITH '
+        rest = sql[4:].strip()
+        
+        # Find CTE name and its subquery
+        m = re.match(r'(\w+)\s+AS\s*\(', rest, re.IGNORECASE)
+        if not m:
+            return "Error: Invalid WITH syntax"
+        cte_name = m.group(1)
+        start_paren = m.end() - 1   # position of '('
+        
+        # Find matching closing parenthesis
+        paren_depth = 1
+        i = start_paren + 1
+        while i < len(rest) and paren_depth > 0:
+            if rest[i] == '(':
+                paren_depth += 1
+            elif rest[i] == ')':
+                paren_depth -= 1
+            i += 1
+        if paren_depth != 0:
+            return "Error: Unmatched parentheses in CTE"
+        
+        subquery = rest[start_paren + 1 : i - 1].strip()
+        main_query = rest[i:].strip()
+        
+        # Execute the CTE subquery (may itself be a CTE or normal SELECT)
+        if subquery.upper().startswith("WITH"):
+            sub_rows_str = self._execute_with(subquery, depth + 1)
+        else:
+            sub_rows_str = self._select(subquery, depth + 1)
+        
+        if sub_rows_str.startswith("Error:"):
+            return sub_rows_str
+        
+        sub_rows = json.loads(sub_rows_str)
+        
+        # Save original table/schema data to restore later
+        original_tables = self.storage.data['tables'].copy()
+        original_schemas = self.storage.data['schemas'].copy()
+        
+        # Create a fake schema for the CTE
+        if sub_rows and len(sub_rows) > 0:
+            columns = [
+                {"name": k, "type": "TEXT", "constraints": [], "default": None, "auto_increment": False}
+                for k in sub_rows[0].keys()
+            ]
+        else:
+            columns = []
+        
+        # Temporarily inject CTE as a table
+        self.storage.data['schemas'][cte_name] = columns
+        self.storage.data['tables'][cte_name] = sub_rows
+        
+        # Execute the main query (may contain the CTE name as a table)
+        if main_query.upper().startswith("WITH"):
+            result_str = self._execute_with(main_query, depth + 1)
+        else:
+            result_str = self._select(main_query, depth + 1)
+        
+        # Restore original state
+        self.storage.data['tables'] = original_tables
+        self.storage.data['schemas'] = original_schemas
+        
+        return result_str
+    
+
+    def _evaluate_exists(self, subquery_sql: str, outer_row: Dict, outer_table: str, depth: int = 0) -> bool:
+        """
+        Evaluate an EXISTS (or NOT EXISTS) subquery for a single outer row.
+        Replaces occurrences of 'outer_table.column' with the literal value from outer_row,
+        then executes the subquery and returns True if it returns at least one row.
+        """
+        # Clone the subquery string
+        rewritten = subquery_sql
+        # Replace each outer column reference with its value
+        for col_name, col_val in outer_row.items():
+            # Pattern: outer_table.col_name (e.g., users.id)
+            pattern = rf'\b{outer_table}\.{col_name}\b'
+            # Convert value to SQL literal
+            if col_val is None:
+                replacement = 'NULL'
+            elif isinstance(col_val, str):
+                replacement = f"'{col_val}'"
+            else:
+                replacement = str(col_val)
+            rewritten = re.sub(pattern, replacement, rewritten, flags=re.IGNORECASE)
+        # Execute the rewritten subquery
+        try:
+            result_str = self._select(rewritten, depth + 1)
+            if result_str.startswith("Error:"):
+                logger.error(f"EXISTS subquery failed: {result_str}")
+                return False
+            rows = json.loads(result_str)
+            return len(rows) > 0
+        except Exception as e:
+            logger.error(f"Error evaluating EXISTS subquery: {e}")
+            return False

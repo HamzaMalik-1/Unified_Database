@@ -118,11 +118,12 @@ class NLPProcessor:
 
     # ---------- Table/collection extraction ----------
     def _get_known_tables(self) -> List[str]:
+        tables = []
         try:
             sql_engine = self.catalog.get_current_sql_engine()
             tables = list(sql_engine.storage.data["tables"].keys())
         except:
-            tables = []
+            pass
         try:
             nosql_engine = self.catalog.get_current_nosql_engine()
             collections = list(nosql_engine.storage.data["collections"].keys())
@@ -133,15 +134,29 @@ class NLPProcessor:
 
     def _extract_table(self, text: str) -> Optional[str]:
         tables = self._get_known_tables()
-        for t in tables:
-            if re.search(rf'\b{t.lower()}\b', text):
+        # Sort by length descending (longest first) to prioritise longer names
+        tables_sorted = sorted(tables, key=len, reverse=True)
+        for t in tables_sorted:
+            if re.search(rf'\b{re.escape(t)}\b', text, re.IGNORECASE):
                 return t
-        for t in tables:
-            if t.lower() in text:
-                return t
+
+        # Fallback: try to extract the word immediately after "from"
+        from_match = re.search(r'\bfrom\s+([a-z_][a-z0-9_]*)', text, re.IGNORECASE)
+        if from_match:
+            candidate = from_match.group(1)
+            # If candidate is not in known tables, we still return it (the engine will error if it doesn't exist)
+            return candidate
+
         return None
 
+   
+   
     def _get_column_names(self, table: str) -> List[str]:
+        """
+        Return column names for a SQL table or NoSQL collection (including nested field paths).
+        """
+        columns = []
+        # First try SQL schema
         try:
             sql_engine = self.catalog.get_current_sql_engine()
             schema = sql_engine.storage.get_schema(table)
@@ -149,13 +164,32 @@ class NLPProcessor:
                 return [col["name"] for col in schema]
         except:
             pass
-        return []
 
-    def _map_column_name(self, col: str) -> str:
-        return self.COLUMN_MAPPING.get(col, col)
+        # Then try NoSQL: get field names from the first document
+        try:
+            nosql_engine = self.catalog.get_current_nosql_engine()
+            coll_data = nosql_engine.storage.data.get("collections", {}).get(table, [])
+            if coll_data and len(coll_data) > 0:
+                first_doc = coll_data[0]
+                # Add top-level keys
+                columns = list(first_doc.keys())
+                # Also add common nested paths (if any value is a dict)
+                for key, value in first_doc.items():
+                    if isinstance(value, dict):
+                        for subkey in value.keys():
+                            columns.append(f"{key}.{subkey}")
+        except:
+            pass
 
-    # ---------- Column projection extraction ----------
+        # Fallback to common column names (including typical nested fields)
+        if not columns:
+            columns = ["id", "name", "age", "email", "city", "amount", "price", "quantity",
+                    "address.city", "address.zip", "address.street"]
+        return columns
+
+
     def _extract_columns(self, text: str) -> Optional[List[str]]:
+        """Extract specific column names (supports dot notation for nested fields)."""
         table = self._extract_table(text)
         if not table:
             return None
@@ -164,12 +198,24 @@ class NLPProcessor:
             return None
         before = parts[0]
         known_cols = self._get_column_names(table)
-        common = ["id", "name", "age", "email", "city", "amount", "price", "quantity"]
-        candidates = re.findall(r'\b([a-z_]+)\b', before)
-        cols = [c for c in candidates if c in known_cols or c in common]
+        # Match words that can contain dots (nested fields) and underscores
+        candidates = re.findall(r'\b([a-z_][a-z0-9_.]*)\b', before, re.IGNORECASE)
+        cols = []
+        for c in candidates:
+            # If c is in known columns (case-insensitive), accept it
+            if c.lower() in [kc.lower() for kc in known_cols]:
+                cols.append(c)
+            # Also accept if it matches a common pattern (e.g., "address.city")
+            elif '.' in c:
+                cols.append(c)
         if cols:
-            return list(dict.fromkeys(cols))
+            return list(dict.fromkeys(cols))   # preserve order, remove duplicates
         return None
+
+    def _map_column_name(self, col: str) -> str:
+        return self.COLUMN_MAPPING.get(col, col)
+
+ 
 
     def _extract_distinct(self, text: str) -> bool:
         return "distinct" in text or "unique" in text

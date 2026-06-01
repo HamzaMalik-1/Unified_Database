@@ -63,8 +63,10 @@ class SQLParser:
 
     @staticmethod
     def parse_select(sql: str) -> Dict[str, Any]:
-        """Parse SELECT with support for joins, derived tables, subqueries, and cross‑model NOSQL subqueries."""
+        """Parse SELECT with support for joins, derived tables, subqueries, cross‑model NOSQL subqueries, and DISTINCT."""
         sql = sql.strip()
+        original_sql_upper = sql.upper()
+
         # Find the position of the main FROM keyword (not inside parentheses)
         paren_depth = 0
         from_pos = -1
@@ -78,7 +80,18 @@ class SQLParser:
                 break
         if from_pos == -1:
             raise ValueError("SELECT missing FROM clause")
+
         select_part = sql[6:from_pos].strip()        # after "SELECT "
+
+        # --- DISTINCT detection (robust) ---
+        distinct = False
+        # Use regex to match "DISTINCT" as a whole word, case-insensitive
+        import re
+        distinct_match = re.match(r'(?i)^DISTINCT\s+', select_part)
+        if distinct_match:
+            distinct = True
+            select_part = select_part[distinct_match.end():].strip()
+
         after_from = sql[from_pos+4:].strip()        # everything after FROM
 
         # --- Find where the FROM clause ends (before WHERE, ORDER, GROUP, LIMIT, HAVING) ---
@@ -156,7 +169,6 @@ class SQLParser:
                 if len(tokens) < 3:
                     raise ValueError("Missing alias after AS")
                 main_table = tokens[2]
-                # Remove the first three tokens
                 tokens = tokens[3:]
             else:
                 raise ValueError("Derived table requires alias (AS alias)")
@@ -164,7 +176,7 @@ class SQLParser:
             main_table = tokens[0]
             tokens = tokens[1:]
 
-        # Parse joins (remaining tokens) – the logic is identical to your existing join parsing
+        # Parse joins (remaining tokens)
         joins = []
         i = 0
         while i < len(tokens):
@@ -278,10 +290,9 @@ class SQLParser:
                 condition = ' '.join(condition_parts)
                 joins.append(('INNER', join_table, condition))
             else:
-                # Unexpected token – could be part of a subquery alias that we missed? For now, raise error.
                 raise ValueError(f"Unexpected token in FROM clause: {token}")
 
-        # --- Parse SELECT columns (unchanged) ---
+        # --- Parse SELECT columns (now without the "DISTINCT " prefix) ---
         if select_part == "*":
             columns = "*"
         else:
@@ -342,9 +353,10 @@ class SQLParser:
             "order_by": order_by,
             "limit": limit,
             "group_by": group_by,
-            "having": having
+            "having": having,
+            "distinct": distinct          # <-- CRITICAL: return the flag
         }
-        
+         
     @staticmethod
     def parse_update(sql: str) -> Dict[str, Any]:
         """

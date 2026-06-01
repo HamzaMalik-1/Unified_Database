@@ -296,7 +296,7 @@ class NoSQLDatabase:
             logger.error(f"DELETE failed: {e}")
             return f"Error: {e}"
 
-    # ---------- SELECT with index usage ----------
+   # ---------- SELECT with index usage ----------
     def _select(self, sql: str) -> str:
         try:
             parsed = NoSQLParser.parse_select(sql)
@@ -346,8 +346,14 @@ class NoSQLDatabase:
             if where_cond:
                 docs = [d for d in docs if self._evaluate_condition(d, where_cond)]
 
-            # GROUP BY + aggregates
+            # ----- GROUP BY / aggregates (support multiple columns) -----
             if group_by:
+                # Ensure group_by is a list (backward compatibility: split string)
+                if isinstance(group_by, str):
+                    group_cols = [col.strip() for col in group_by.split(',')]
+                else:
+                    group_cols = group_by   # already a list
+
                 if columns_spec == "*":
                     regular_fields = []
                     agg_specs = {}
@@ -356,14 +362,19 @@ class NoSQLDatabase:
 
                 groups = {}
                 for doc in docs:
-                    key = self._get_nested(doc, group_by)
+                    # Build composite key as a tuple of values for all group columns
+                    key = tuple(self._get_nested(doc, col) for col in group_cols)
                     if key not in groups:
                         groups[key] = []
                     groups[key].append(doc)
 
                 result_docs = []
                 for key, group_docs in groups.items():
-                    row = {group_by: key}
+                    row = {}
+                    # Add each group column value (for single column, key is a 1‑tuple)
+                    for i, col in enumerate(group_cols):
+                        row[col] = key[i]
+                    # Non‑aggregate regular fields: take first non‑null from any row in group
                     for f in regular_fields:
                         val = None
                         for d in group_docs:
@@ -371,6 +382,7 @@ class NoSQLDatabase:
                             if val is not None:
                                 break
                         row[f] = val
+                    # Aggregate functions
                     for alias, (func, src_field) in agg_specs.items():
                         if src_field == "count":
                             values = [1] * len(group_docs)
@@ -391,7 +403,9 @@ class NoSQLDatabase:
                 docs = result_docs
                 if having_cond:
                     docs = [d for d in docs if self._evaluate_condition(d, having_cond)]
+
             else:
+                # No GROUP BY – possible global aggregates
                 if columns_spec != "*":
                     regular_fields, agg_specs = self._prepare_aggregates(columns_spec)
                     if agg_specs:
@@ -425,7 +439,7 @@ class NoSQLDatabase:
                 start = offset if offset is not None else 0
                 docs = docs[start:start+limit_val]
 
-            # Project specific columns
+            # Project specific columns (if no GROUP BY and no aggregates)
             if columns_spec != "*" and not group_by and not agg_specs:
                 selected = []
                 for doc in docs:

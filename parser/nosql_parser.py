@@ -37,21 +37,25 @@ class NoSQLParser:
         if not from_match:
             raise ValueError("SELECT missing FROM clause")
         collection = from_match.group(1)
+        
         select_to_from = re.match(r"SELECT\s+(.+?)\s+FROM", sql, re.IGNORECASE | re.DOTALL)
         if not select_to_from:
             raise ValueError("Invalid SELECT syntax")
         columns_part = select_to_from.group(1).strip()
         columns = "*" if columns_part == "*" else [c.strip() for c in columns_part.split(',')]
+        
         where_cond = None
         where_match = re.search(r"\bWHERE\s+(.+?)(?:\s+ORDER\s+BY|\s+GROUP\s+BY|\s+LIMIT|$)", sql, re.IGNORECASE | re.DOTALL)
         if where_match:
             where_cond = where_match.group(1).strip()
+        
         order_by = None
         order_match = re.search(r"\bORDER\s+BY\s+([\w.]+)\s*(ASC|DESC)?", sql, re.IGNORECASE)
         if order_match:
             field = order_match.group(1)
             direction = order_match.group(2).upper() if order_match.group(2) else "ASC"
             order_by = (field, direction)
+        
         limit = None
         limit_match = re.search(r"\bLIMIT\s+(\d+)(?:\s*,\s*(\d+))?", sql, re.IGNORECASE)
         if limit_match:
@@ -62,22 +66,30 @@ class NoSQLParser:
             else:
                 limit_val = int(limit_match.group(1))
                 limit = (limit_val, None)
+        
+        # --- MULTI‑COLUMN GROUP BY ---
         group_by = None
-        group_match = re.search(r"\bGROUP\s+BY\s+([\w.]+)", sql, re.IGNORECASE)
+        # Capture everything after GROUP BY until HAVING, ORDER BY, LIMIT, or end of string
+        group_match = re.search(r"\bGROUP\s+BY\s+(.+?)(?:\s+HAVING|\s+ORDER\s+BY|\s+LIMIT|$)", sql, re.IGNORECASE | re.DOTALL)
         if group_match:
-            group_by = group_match.group(1)
+            group_by_str = group_match.group(1).strip()
+            # Split by commas, strip whitespace from each column name
+            group_by = [col.strip() for col in group_by_str.split(',')]
+        
         having = None
         if group_by:
+            # HAVING clause: capture after HAVING until next clause
             having_match = re.search(r"\bHAVING\s+(.+?)(?:\s+ORDER\s+BY|\s+LIMIT|$)", sql, re.IGNORECASE | re.DOTALL)
             if having_match:
                 having = having_match.group(1).strip()
+        
         return {
             "columns": columns,
             "collection": collection,
             "where": where_cond,
             "order_by": order_by,
             "limit": limit,
-            "group_by": group_by,
+            "group_by": group_by,      # now a list of column names, or None
             "having": having
         }
 
