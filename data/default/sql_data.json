@@ -22,20 +22,87 @@
         "default": null,
         "auto_increment": false
       }
+    ],
+    "order": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      }
+    ],
+    "product": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      }
+    ],
+    "orders": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "user_id",
+        "type": "INT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "amount",
+        "type": "REAL",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      }
+    ],
+    "qwe": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      }
     ]
   },
   "tables": {
     "users": [
-      {
-        "id": 1,
-        "name": "Alice",
-        "city": null
-      },
-      {
-        "id": 1,
-        "name": "Alice",
-        "city": "abc"
-      },
       {
         "id": 2,
         "name": "Bob",
@@ -45,20 +112,38 @@
         "id": 3,
         "name": "Alice",
         "city": "abc"
-      },
+      }
+    ],
+    "order": [
       {
         "id": 1,
-        "name": "Alice",
-        "city": null
+        "name": "abc"
       }
-    ]
+    ],
+    "product": [],
+    "orders": [
+      {
+        "id": 101,
+        "user_id": 1,
+        "amount": 100.0
+      }
+    ],
+    "qwe": []
   },
   "indexes": {},
   "foreign_keys": {
-    "users": []
+    "users": [],
+    "order": [],
+    "product": [],
+    "orders": [],
+    "qwe": []
   },
   "check_constraints": {
-    "users": []
+    "users": [],
+    "order": [],
+    "product": [],
+    "orders": [],
+    "qwe": []
   },
   "auto_increment": {},
   "views": {},

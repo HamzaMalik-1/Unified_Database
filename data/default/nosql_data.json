@@ -33,7 +33,8 @@
         "region": "South",
         "amount": 600
       }
-    ]
+    ],
+    "logs": []
   },
   "nosql_indexes": {},
   "text_indexes": {}

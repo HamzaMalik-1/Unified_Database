@@ -9,8 +9,12 @@ class Storage:
 
     def load(self):
         if os.path.exists(self.filename):
-            with open(self.filename, 'r') as f:
-                self.data = json.load(f)
+            try:
+                with open(self.filename, 'r') as f:
+                    self.data = json.load(f)
+            except (json.JSONDecodeError, IOError):
+                # File exists but is empty or corrupt – start fresh
+                self.data = {"schemas": {}, "tables": {}}
         else:
             self.data = {"schemas": {}, "tables": {}}
 

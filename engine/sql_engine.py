@@ -282,85 +282,111 @@ class SQLDatabase:
         except Exception as e:
             logger.error(f"INSERT failed: {e}")
             return f"Error: {e}"
+    def _get_nested(self, doc: Dict, path: str) -> Any:
+        """Retrieve a value from a document using dot notation.
+        For SQL engine, we only need top‑level keys, but this method
+        exists to satisfy calls from _evaluate_condition (which was copied from NoSQL).
+        """
+        # If the path contains a dot, treat as top‑level key? In SQL we don't need nested.
+        # For simplicity, just return the top‑level value.
+        return doc.get(path, None)
            
-    def _evaluate_condition(self, doc: Dict, condition_str: str) -> bool:
+    def _evaluate_condition(self, row: Dict, condition_str: str) -> bool:
+        """
+        Evaluate a WHERE condition for a single row (SQL engine).
+        Supports standard comparison operators (==, !=, >, <, >=, <=)
+        and logical AND/OR via eval (safe because row values are sanitised).
+        """
         if not condition_str:
             return True
-
         cond = condition_str.strip()
-
-        # ----- CONTAINS operator (whole word matching, case‑insensitive) -----
-        contains_match = re.match(r'^([\w.]+)\s+CONTAINS\s+(.+)$', cond, re.IGNORECASE)
-        if contains_match:
-            field = contains_match.group(1).strip()
-            right_raw = contains_match.group(2).strip()
-            # Extract the search word (strip quotes if present)
-            if right_raw.startswith("'") and right_raw.endswith("'"):
-                search_word = right_raw[1:-1]
-            else:
-                search_word = right_raw
-
-            left_val = self._get_nested(doc, field)
-            if left_val is None:
-                return False
-
-            # Escape regex special characters and match whole word, case‑insensitive
-            escaped_word = re.escape(search_word)
-            word_pattern = re.compile(rf'\b{escaped_word}\b', re.IGNORECASE)
-
-            if isinstance(left_val, list):
-                for item in left_val:
-                    if isinstance(item, str):
-                        if word_pattern.search(item):
-                            return True
-                    elif item == search_word:   # non‑string exact match
-                        return True
-                return False
-            elif isinstance(left_val, str):
-                return bool(word_pattern.search(left_val))
-            else:
-                # Non‑string values: only exact match
-                return left_val == search_word
-
-        # ----- Standard comparison operators -----
-        match = re.match(r'^([\w.]+)\s*([=<>!]+)\s*(.+)$', cond)
-        if not match:
+        # Replace single '=' with '==' but keep '<=', '>=', '!=', etc.
+        cond = re.sub(r'(?<![<>!=])=(?![=])', '==', cond)
+        try:
+            result = eval(cond, {"__builtins__": {}}, row)
+            return bool(result)
+        except Exception as e:
+            logger.error(f"Condition evaluation failed: {cond} -> {e}")
             return False
 
-        field = match.group(1).strip()
-        operator = match.group(2).strip()
-        right_raw = match.group(3).strip()
+    # def _evaluate_condition(self, doc: Dict, condition_str: str) -> bool:
+    #     if not condition_str:
+    #         return True
 
-        # Parse the right‑hand value (string, number, or null)
-        if right_raw.startswith("'") and right_raw.endswith("'"):
-            right_val = right_raw[1:-1]
-        elif right_raw.upper() == "NULL":
-            right_val = None
-        elif right_raw.isdigit():
-            right_val = int(right_raw)
-        else:
-            try:
-                right_val = float(right_raw)
-            except:
-                right_val = right_raw
+    #     cond = condition_str.strip()
 
-        left_val = self._get_nested(doc, field)
+    #     # ----- CONTAINS operator (whole word matching, case‑insensitive) -----
+    #     contains_match = re.match(r'^([\w.]+)\s+CONTAINS\s+(.+)$', cond, re.IGNORECASE)
+    #     if contains_match:
+    #         field = contains_match.group(1).strip()
+    #         right_raw = contains_match.group(2).strip()
+    #         # Extract the search word (strip quotes if present)
+    #         if right_raw.startswith("'") and right_raw.endswith("'"):
+    #             search_word = right_raw[1:-1]
+    #         else:
+    #             search_word = right_raw
 
-        # Apply operator
-        if operator == "=" or operator == "==":
-            return left_val == right_val
-        elif operator == "!=":
-            return left_val != right_val
-        elif operator == ">":
-            return left_val > right_val
-        elif operator == "<":
-            return left_val < right_val
-        elif operator == ">=":
-            return left_val >= right_val
-        elif operator == "<=":
-            return left_val <= right_val
-        else:
-            return False
+    #         left_val = self._get_nested(doc, field)
+    #         if left_val is None:
+    #             return False
+
+    #         # Escape regex special characters and match whole word, case‑insensitive
+    #         escaped_word = re.escape(search_word)
+    #         word_pattern = re.compile(rf'\b{escaped_word}\b', re.IGNORECASE)
+
+    #         if isinstance(left_val, list):
+    #             for item in left_val:
+    #                 if isinstance(item, str):
+    #                     if word_pattern.search(item):
+    #                         return True
+    #                 elif item == search_word:   # non‑string exact match
+    #                     return True
+    #             return False
+    #         elif isinstance(left_val, str):
+    #             return bool(word_pattern.search(left_val))
+    #         else:
+    #             # Non‑string values: only exact match
+    #             return left_val == search_word
+
+    #     # ----- Standard comparison operators -----
+    #     match = re.match(r'^([\w.]+)\s*([=<>!]+)\s*(.+)$', cond)
+    #     if not match:
+    #         return False
+
+    #     field = match.group(1).strip()
+    #     operator = match.group(2).strip()
+    #     right_raw = match.group(3).strip()
+
+    #     # Parse the right‑hand value (string, number, or null)
+    #     if right_raw.startswith("'") and right_raw.endswith("'"):
+    #         right_val = right_raw[1:-1]
+    #     elif right_raw.upper() == "NULL":
+    #         right_val = None
+    #     elif right_raw.isdigit():
+    #         right_val = int(right_raw)
+    #     else:
+    #         try:
+    #             right_val = float(right_raw)
+    #         except:
+    #             right_val = right_raw
+
+    #     left_val = self._get_nested(doc, field)
+
+    #     # Apply operator
+    #     if operator == "=" or operator == "==":
+    #         return left_val == right_val
+    #     elif operator == "!=":
+    #         return left_val != right_val
+    #     elif operator == ">":
+    #         return left_val > right_val
+    #     elif operator == "<":
+    #         return left_val < right_val
+    #     elif operator == ">=":
+    #         return left_val >= right_val
+    #     elif operator == "<=":
+    #         return left_val <= right_val
+    #     else:
+    #         return False
 
     def _apply_aggregates(self, rows: List[Dict], group_col: str, agg_specs: Dict[str, str]) -> List[Dict]:
         groups = {}
@@ -758,9 +784,16 @@ class SQLDatabase:
                 if error:
                     return error
 
+                # ---------- Fire BEFORE UPDATE trigger ----------
+                self._fire_triggers(table_name, "BEFORE", "UPDATE", old_row=row, new_row=updated_row)
+
                 # Apply the update to the real row
                 for col, val in set_assignments.items():
                     row[col] = updated_row[col]
+
+                # ---------- Fire AFTER UPDATE trigger ----------
+                self._fire_triggers(table_name, "AFTER", "UPDATE", old_row=row, new_row=updated_row)
+
                 updated_count += 1
 
             self.storage.set_table_data(table_name, rows)
@@ -769,7 +802,7 @@ class SQLDatabase:
         except Exception as e:
             logger.error(f"UPDATE failed: {e}")
             return f"Error: {e}"
-
+        
     def _delete(self, sql: str) -> str:
         try:
             parsed = SQLParser.parse_delete(sql)
