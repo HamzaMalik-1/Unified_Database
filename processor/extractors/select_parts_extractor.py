@@ -194,8 +194,11 @@ class SelectPartsExtractor:
     # ──────────────────────────────────────────────────────────────────────
 
     def extract_offset(self, text: str) -> Optional[int]:
-        m = re.search(r'\boffset\s+(\d+)\b', text)
-        return int(m.group(1)) if m else None
+        # Match "offset <number>" anywhere, even after "limit"
+        match = re.search(r'\boffset\s+(\d+)\b', text, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        return None
 
     # ──────────────────────────────────────────────────────────────────────
     #  JOIN detection  →  (join_type, other_table, on_condition) or None
