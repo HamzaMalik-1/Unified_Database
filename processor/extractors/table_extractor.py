@@ -5,10 +5,11 @@ Responsible for finding the target table / collection name in a query.
 
 Resolution order:
   1. Exact token match against known tables  (fastest)
-  2. Regex "FROM <word>" pattern
-  3. Regex verb pattern  ("show/list/find <word>")
-  4. Fuzzy match via RapidFuzz  (catches typos like "custommers")
-  5. spaCy dependency-parse fallback  (catches complex phrasing)
+  2. INSERT/UPDATE/DELETE context patterns
+  3. Regex "FROM <word>" pattern
+  4. Regex verb pattern  ("show/list/find <word>")
+  5. Fuzzy match via RapidFuzz  (catches typos like "custommers")
+  6. spaCy dependency-parse fallback  (catches complex phrasing)
 """
 
 from __future__ import annotations
@@ -79,15 +80,36 @@ class TableExtractor:
             if re.search(rf'\b{re.escape(table.lower())}\b', text):
                 return table
 
-        # ── 2. FROM <word> ─────────────────────────────────────────────────
+        # ── 2. INSERT/UPDATE/DELETE context patterns ───────────────────────
+        patterns = [
+            (r'\badd\s+(?:a|an|new)\s+([a-z_][a-z0-9_]*)', 1),   # "add a user"
+            (r'\binsert\s+into\s+([a-z_][a-z0-9_]*)', 1),
+            (r'\bupdate\s+([a-z_][a-z0-9_]*)', 1),
+            (r'\bdelete\s+from\s+([a-z_][a-z0-9_]*)', 1),
+            (r'\binto\s+([a-z_][a-z0-9_]*)', 1),                  # "insert into orders"
+        ]
+        for pattern, group in patterns:
+            m = re.search(pattern, text)
+            if m:
+                candidate = m.group(group)
+                if candidate in _SKIP_WORDS:
+                    continue
+                resolved = self._resolve_candidate(candidate, known_tables)
+                if resolved:
+                    return resolved
+                # If no resolution, return the candidate anyway (caller will check existence)
+                return candidate
+
+        # ── 3. FROM <word> ─────────────────────────────────────────────────
         from_match = re.search(r'\bfrom\s+([a-z_][a-z0-9_]*)', text)
         if from_match:
             candidate = from_match.group(1)
             resolved = self._resolve_candidate(candidate, known_tables)
             if resolved:
                 return resolved
+            return candidate  # fallback
 
-        # ── 3. Verb pattern: "show/list/find [top N] <word>" ──────────────
+        # ── 4. Verb pattern: "show/list/find [top N] <word>" ──────────────
         verb_match = re.search(
             r'\b(?:show|list|find|select|get|fetch|display|retrieve)\s+'
             r'(?:(?:top|bottom|first|last)\s+)?(?:\d+\s+)?([a-z_][a-z0-9_]*)',
@@ -99,13 +121,14 @@ class TableExtractor:
                 resolved = self._resolve_candidate(candidate, known_tables)
                 if resolved:
                     return resolved
+                return candidate
 
-        # ── 4. Fuzzy match (full text tokens vs known tables) ─────────────
+        # ── 5. Fuzzy match (full text tokens vs known tables) ─────────────
         fuzzy_result = self._fuzzy_match(text, known_tables)
         if fuzzy_result:
             return fuzzy_result
 
-        # ── 5. spaCy dependency parse ──────────────────────────────────────
+        # ── 6. spaCy dependency parse ──────────────────────────────────────
         return self._spacy_extract(text, known_tables)
 
     # ──────────────────────────────────────────────────────────────────────
@@ -113,13 +136,24 @@ class TableExtractor:
     # ──────────────────────────────────────────────────────────────────────
 
     def _resolve_candidate(self, candidate: str, known_tables: List[str]) -> Optional[str]:
-        """Try exact → fuzzy resolution for a single candidate word."""
-        # Exact
+        """Try exact → singular/plural → fuzzy resolution for a candidate word."""
+        # Exact match
         for t in known_tables:
             if t.lower() == candidate.lower():
                 return t
 
-        # Fuzzy
+        # Try singular/plural variants
+        variants = {candidate}
+        if candidate.endswith('s'):
+            variants.add(candidate[:-1])   # remove trailing 's'
+        else:
+            variants.add(candidate + 's')  # add 's'
+        for var in variants:
+            for t in known_tables:
+                if t.lower() == var.lower():
+                    return t
+
+        # Fuzzy match
         rf = _get_rapidfuzz()
         if rf and known_tables:
             rfprocess, fuzz = rf
@@ -174,6 +208,7 @@ class TableExtractor:
                         resolved = self._resolve_candidate(candidate, known_tables)
                         if resolved:
                             return resolved
+                        return candidate  # fallback
 
         # Noun after "from"
         for i, token in enumerate(doc):
@@ -184,6 +219,7 @@ class TableExtractor:
                     resolved = self._resolve_candidate(candidate, known_tables)
                     if resolved:
                         return resolved
+                    return candidate
 
         # Last resort: first noun after the main verb
         for token in doc:
@@ -194,6 +230,7 @@ class TableExtractor:
                         resolved = self._resolve_candidate(candidate, known_tables)
                         if resolved:
                             return resolved
+                        return candidate
                 break
 
         return None

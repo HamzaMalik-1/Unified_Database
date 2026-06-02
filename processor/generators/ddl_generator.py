@@ -55,10 +55,74 @@ class DDLGenerator:
     # ── TABLE / COLLECTION ────────────────────────────────────────────────
 
     def create_table(self, text: str) -> Optional[str]:
+        # 1. Extract table name
         m = re.search(r'create\s+table\s+(\w+)', text)
-        if m:
-            return f"SQL CREATE TABLE {m.group(1)} (id INT PRIMARY KEY, name TEXT)"
-        return None
+        if not m:
+            return None
+        table_name = m.group(1)
+
+        # 2. Extract column list
+        after_table = text[m.end():].strip()
+        col_names = []
+        # Look for column list after "with" or in parentheses
+        col_list_str = None
+        m_with = re.search(r'with\s+(.+?)(?:\s+where|\s+having|\s+order|\s+limit|$)', after_table, re.IGNORECASE)
+        if m_with:
+            col_list_str = m_with.group(1)
+        else:
+            m_paren = re.search(r'\((.+?)\)', after_table)
+            if m_paren:
+                col_list_str = m_paren.group(1)
+            else:
+                # No delimiter – treat all remaining words as column names (stop at common keywords)
+                col_list_str = re.split(r'\s+(?:where|having|order|limit|into|values)', after_table)[0]
+
+        if col_list_str:
+            # Split by commas or whitespace
+            if ',' in col_list_str:
+                parts = [p.strip() for p in col_list_str.split(',')]
+            else:
+                parts = col_list_str.split()
+            for part in parts:
+                # Remove punctuation, keep only words
+                col = re.sub(r'[^\w]', '', part)
+                if col and col.lower() not in ('and', 'or', 'with', 'table', 'create'):
+                    col_names.append(col)
+        else:
+            col_names = []
+
+        if not col_names:
+            col_names = ['id', 'name']  # fallback
+
+        # 3. Helper to infer type and constraints from column name
+        def infer_column_def(col: str) -> str:
+            col_lower = col.lower()
+            # Primary key detection
+            if col_lower == 'id' or col_lower.endswith('_id'):
+                return f"{col} INT PRIMARY KEY"
+            # Numeric columns
+            if col_lower in ('age', 'quantity', 'count', 'stock', 'year', 'month', 'day', 'rating', 'score'):
+                return f"{col} INT"
+            if col_lower in ('price', 'amount', 'total', 'cost', 'revenue', 'balance', 'rate', 'tax'):
+                return f"{col} REAL"
+            # Boolean / flag columns
+            if col_lower in ('is_active', 'is_deleted', 'has_shipped', 'flag', 'enabled', 'disabled'):
+                return f"{col} BOOLEAN"
+            # Date / time columns
+            if col_lower in ('created_at', 'updated_at', 'timestamp', 'date', 'time', 'datetime'):
+                return f"{col} TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+            # Text columns (default)
+            # Mark 'name', 'title', 'description' as NOT NULL
+            if col_lower in ('name', 'title', 'description', 'email', 'username', 'address'):
+                return f"{col} TEXT NOT NULL"
+            return f"{col} TEXT"
+
+        # 4. Build column definitions
+        col_defs = [infer_column_def(col) for col in col_names]
+
+        # 5. Create final command
+        col_def_str = ", ".join(col_defs)
+        return f"SQL CREATE TABLE {table_name} ({col_def_str})"
 
     def create_collection(self, text: str) -> Optional[str]:
         m = re.search(r'create\s+collection\s+(\w+)', text)

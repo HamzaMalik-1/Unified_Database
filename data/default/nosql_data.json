@@ -1,43 +1,7 @@
 {
   "schemas": {},
   "tables": {},
-  "collections": {
-    "nosql_users": [
-      {
-        "user_id": 1,
-        "user_name": "Alice",
-        "address": {
-          "city": "Boston"
-        },
-        "hobbies": [
-          "tennis"
-        ]
-      }
-    ],
-    "collect": [],
-    "sales": [
-      {
-        "product": "Laptop",
-        "region": "North",
-        "amount": 1000
-      },
-      {
-        "product": "Laptop",
-        "region": "South",
-        "amount": 1500
-      },
-      {
-        "product": "Phone",
-        "region": "North",
-        "amount": 500
-      },
-      {
-        "product": "Phone",
-        "region": "South",
-        "amount": 600
-      }
-    ]
-  },
+  "collections": {},
   "nosql_indexes": {},
   "text_indexes": {}
 }

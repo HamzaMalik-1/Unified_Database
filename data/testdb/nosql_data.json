@@ -1,7 +1,11 @@
 {
   "schemas": {},
   "tables": {},
-  "collections": {},
+  "collections": {
+    "nosql_users": [],
+    "sales": [],
+    "docs": []
+  },
   "nosql_indexes": {},
   "text_indexes": {}
 }

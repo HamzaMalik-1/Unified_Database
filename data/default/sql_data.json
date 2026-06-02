@@ -1,35 +1,6 @@
 {
   "schemas": {
-    "users": [
-      {
-        "name": "id",
-        "type": "INT",
-        "constraints": [],
-        "default": null,
-        "auto_increment": false
-      },
-      {
-        "name": "name",
-        "type": "TEXT",
-        "constraints": [],
-        "default": null,
-        "auto_increment": false
-      },
-      {
-        "name": "city",
-        "type": "TEXT",
-        "constraints": [],
-        "default": null,
-        "auto_increment": false
-      },
-      {
-        "name": "status",
-        "type": "TEXT",
-        "constraints": [],
-        "default": "active"
-      }
-    ],
-    "order": [
+    "orders": [
       {
         "name": "id",
         "type": "INT",
@@ -60,23 +31,9 @@
       {
         "name": "name",
         "type": "TEXT",
-        "constraints": [],
-        "default": null,
-        "auto_increment": false
-      }
-    ],
-    "orders": [
-      {
-        "name": "id",
-        "type": "INT",
-        "constraints": [],
-        "default": null,
-        "auto_increment": false
-      },
-      {
-        "name": "user_id",
-        "type": "INT",
-        "constraints": [],
+        "constraints": [
+          "NOT NULL"
+        ],
         "default": null,
         "auto_increment": false
       },
@@ -86,21 +43,17 @@
         "constraints": [],
         "default": null,
         "auto_increment": false
-      }
-    ],
-    "qwe": [
+      },
       {
-        "name": "id",
-        "type": "INT",
-        "constraints": [
-          "PRIMARY KEY"
-        ],
+        "name": "categories",
+        "type": "TEXT",
+        "constraints": [],
         "default": null,
         "auto_increment": false
       },
       {
-        "name": "name",
-        "type": "TEXT",
+        "name": "price",
+        "type": "REAL",
         "constraints": [],
         "default": null,
         "auto_increment": false
@@ -108,91 +61,20 @@
     ]
   },
   "tables": {
-    "users": [
-      {
-        "id": 2,
-        "name": "Bob",
-        "city": "abc",
-        "status": "active"
-      },
-      {
-        "id": 3,
-        "name": "Alice",
-        "city": "abc",
-        "status": "active"
-      },
-      {
-        "id": null,
-        "name": "eva",
-        "city": null,
-        "status": "active"
-      },
-      {
-        "id": null,
-        "name": "eva",
-        "city": null,
-        "status": "active"
-      }
-    ],
-    "order": [
-      {
-        "id": 1,
-        "name": "abc"
-      }
-    ],
-    "product": [],
-    "orders": [
-      {
-        "id": 101,
-        "user_id": 1,
-        "amount": 100.0
-      }
-    ],
-    "qwe": []
+    "orders": [],
+    "product": []
   },
   "indexes": {},
   "foreign_keys": {
-    "users": [],
-    "order": [],
-    "product": [],
     "orders": [],
-    "qwe": []
+    "product": []
   },
   "check_constraints": {
-    "users": [],
-    "order": [],
-    "product": [],
     "orders": [],
-    "qwe": []
+    "product": []
   },
   "auto_increment": {},
   "views": {},
-  "procedures": {
-    "list_users": {
-      "params": [],
-      "body": "select * from users"
-    },
-    "get_user": {
-      "params": [
-        "uid"
-      ],
-      "body": "select * from users where id = $1"
-    }
-  },
-  "triggers": [
-    {
-      "name": "log_update",
-      "timing": "AFTER",
-      "event": "UPDATE",
-      "table": "users",
-      "statement": "insert into audit (msg) values ('updated')"
-    },
-    {
-      "name": "user_data",
-      "timing": "AFTER",
-      "event": "UPDATE",
-      "table": "users",
-      "statement": "insert into audit (msg) values ('updated')"
-    }
-  ]
+  "procedures": {},
+  "triggers": []
 }

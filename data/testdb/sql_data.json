@@ -1,6 +1,6 @@
 {
   "schemas": {
-    "AC": [
+    "product": [
       {
         "name": "id",
         "type": "INT",
@@ -13,6 +13,90 @@
       {
         "name": "name",
         "type": "TEXT",
+        "constraints": [
+          "NOT NULL"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "amount",
+        "type": "REAL",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "categories",
+        "type": "TEXT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "price",
+        "type": "REAL",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      }
+    ],
+    "order": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "price",
+        "type": "REAL",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "constraints": [
+          "NOT NULL"
+        ],
+        "default": null,
+        "auto_increment": false
+      }
+    ],
+    "users": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "constraints": [
+          "NOT NULL"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "age",
+        "type": "INT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "city",
+        "type": "TEXT",
         "constraints": [],
         "default": null,
         "auto_increment": false
@@ -20,14 +104,28 @@
     ]
   },
   "tables": {
-    "AC": []
+    "product": [],
+    "order": [],
+    "users": [
+      {
+        "id": 1,
+        "name": "bob",
+        "age": 25,
+        "city": "la"
+      }
+    ]
   },
   "indexes": {},
   "foreign_keys": {
-    "AC": []
+    "product": [],
+    "order": [],
+    "users": []
   },
   "check_constraints": {
-    "AC": []
+    "orders": [],
+    "product": [],
+    "order": [],
+    "users": []
   },
   "auto_increment": {},
   "views": {},

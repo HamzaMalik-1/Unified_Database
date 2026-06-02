@@ -97,6 +97,11 @@ class NLPProcessor:
     # ══════════════════════════════════════════════════════════════════════
 
     def _rule_based(self, text: str) -> Optional[str]:
+        # ── Database commands (handled before any other intent) ──────────
+        db_cmd = self._handle_database_command(text)
+        if db_cmd:
+            return db_cmd
+
         token = self.intent.classify(text)
         if token is None:
             return None
@@ -128,6 +133,29 @@ class NLPProcessor:
         handler = dispatch.get(token)
         if handler:
             return handler(text)
+        return None
+
+    def _handle_database_command(self, text: str) -> Optional[str]:
+        """
+        Recognise natural language for database operations.
+        Returns a command like "DATABASE CREATE testdb" or "DATABASE USE testdb".
+        """
+        # Create database
+        m = re.search(r'create\s+database\s+(\w+)', text)
+        if m:
+            return f"DATABASE CREATE {m.group(1)}"
+
+        # Use database – allow "use testdb", "use database testdb", "switch to testdb", etc.
+        # The word "database" is optional.
+        m = re.search(r'\b(?:use|switch\s+to|connect\s+to)\s+(?:database\s+)?(\w+)', text)
+        if m:
+            return f"DATABASE USE {m.group(1)}"
+
+        # Drop database
+        m = re.search(r'drop\s+database\s+(\w+)', text)
+        if m:
+            return f"DATABASE DROP {m.group(1)}"
+
         return None
 
     # ══════════════════════════════════════════════════════════════════════
@@ -236,6 +264,3 @@ class NLPProcessor:
     def _normalise(text: str) -> str:
         """Lowercase, strip, collapse whitespace."""
         return re.sub(r'\s+', ' ', text.lower().strip())
-    
-    
-    
