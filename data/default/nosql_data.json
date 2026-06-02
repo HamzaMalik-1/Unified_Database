@@ -8,7 +8,10 @@
         "user_name": "Alice",
         "address": {
           "city": "Boston"
-        }
+        },
+        "hobbies": [
+          "tennis"
+        ]
       }
     ],
     "collect": [],

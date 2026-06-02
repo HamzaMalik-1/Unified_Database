@@ -120,6 +120,18 @@
         "name": "Alice",
         "city": "abc",
         "status": "active"
+      },
+      {
+        "id": null,
+        "name": "eva",
+        "city": null,
+        "status": "active"
+      },
+      {
+        "id": null,
+        "name": "eva",
+        "city": null,
+        "status": "active"
       }
     ],
     "order": [
@@ -155,6 +167,32 @@
   },
   "auto_increment": {},
   "views": {},
-  "procedures": {},
-  "triggers": []
+  "procedures": {
+    "list_users": {
+      "params": [],
+      "body": "select * from users"
+    },
+    "get_user": {
+      "params": [
+        "uid"
+      ],
+      "body": "select * from users where id = $1"
+    }
+  },
+  "triggers": [
+    {
+      "name": "log_update",
+      "timing": "AFTER",
+      "event": "UPDATE",
+      "table": "users",
+      "statement": "insert into audit (msg) values ('updated')"
+    },
+    {
+      "name": "user_data",
+      "timing": "AFTER",
+      "event": "UPDATE",
+      "table": "users",
+      "statement": "insert into audit (msg) values ('updated')"
+    }
+  ]
 }
