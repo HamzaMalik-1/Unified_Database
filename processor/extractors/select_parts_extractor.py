@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from typing import Optional, List, Tuple
 
-from ..constants import AGGREGATE_PATTERNS, COLUMN_SYNONYMS
+from ..constants import AGGREGATE_PATTERNS, COLUMN_SYNONYMS,GROUP_BY_STOP_WORDS
 
 
 class SelectPartsExtractor:
@@ -38,32 +38,34 @@ class SelectPartsExtractor:
         Return the explicit column list mentioned before the table name,
         or None if only '*' is implied.
         """
-        # Everything *before* the table name is the candidate region
         idx = text.lower().find(table.lower())
         if idx == -1:
             return None
         before = text[:idx]
 
-        # Grab word tokens that can include dots (for nested fields)
         candidates = re.findall(r'\b([a-z_][a-z0-9_.]*)\b', before, re.IGNORECASE)
         known_lower = {c.lower(): c for c in known_cols}
 
         cols: list[str] = []
         for c in candidates:
             cl = c.lower()
-            # Direct match
             if cl in known_lower:
                 cols.append(known_lower[cl])
-            # Synonym
-            elif cl in COLUMN_SYNONYMS and COLUMN_SYNONYMS[cl] in known_lower.values():
-                cols.append(COLUMN_SYNONYMS[cl])
-            # Dot-notation nested field
+            # Don't convert aggregate/business words like
+# "sales", "revenue", etc. into actual columns here.
+# Column extraction should only return columns
+# explicitly requested by the user.
+            elif (
+                    cl in COLUMN_SYNONYMS
+                    and COLUMN_SYNONYMS[cl] in known_lower.values()
+                    and COLUMN_SYNONYMS[cl].lower() == cl
+                ):
+                    cols.append(COLUMN_SYNONYMS[cl])
             elif "." in c:
                 cols.append(c)
 
-        # Preserve order, remove duplicates
         seen: set[str] = set()
-        unique = [c for c in cols if not (c in seen or seen.add(c))]  # type: ignore[func-returns-value]
+        unique = [c for c in cols if not (c in seen or seen.add(c))]
         return unique if unique else None
 
     # ──────────────────────────────────────────────────────────────────────
@@ -78,47 +80,70 @@ class SelectPartsExtractor:
     # ──────────────────────────────────────────────────────────────────────
 
     def extract_aggregates(self, text: str) -> List[Tuple[str, str, str]]:
-        results: list[tuple[str, str, str]] = []
-        for pattern, func in AGGREGATE_PATTERNS:
-            for m in re.finditer(pattern, text):
-                col = m.group(1)
-                col = COLUMN_SYNONYMS.get(col, col)
-                alias = f"{col}_{func.lower()}"
-                results.append((func, col, alias))
+        text_l = text.lower().strip()
 
-        if re.search(r'\b(count of all|count of rows|total rows|total count)\b', text):
+        results: list[tuple[str, str, str]] = []
+
+        # --------------------------------------------------
+        # COUNT(*)
+        # --------------------------------------------------
+        if re.search(
+            r'\b(count of all|count of rows|total rows|total count)\b',
+            text_l
+        ):
+            return [("COUNT", "*", "total")]
+
+        # --------------------------------------------------
+        # COUNT(*)
+        # --------------------------------------------------
+        if re.search(r'count\s*\(\s*\*\s*\)', text_l):
             results.append(("COUNT", "*", "total"))
 
-        # Deduplicate
-        seen: set[tuple[str, str, str]] = set()
-        return [r for r in results if not (r in seen or seen.add(r))]  # type: ignore[func-returns-value]
+        # --------------------------------------------------
+        # Standard aggregate patterns
+        # --------------------------------------------------
+        for pattern, func in AGGREGATE_PATTERNS:
 
-    # ──────────────────────────────────────────────────────────────────────
-    #  GROUP BY
-    # ──────────────────────────────────────────────────────────────────────
+            for m in re.finditer(pattern, text, re.IGNORECASE):
 
-    def extract_group_by(self, text: str) -> Optional[str]:
-        m = re.search(r'\bgroup\s+by\s+(\w+)', text)
-        if m:
-            return m.group(1)
-        m = re.search(r'\bper\s+(\w+)\b', text)
-        if m:
-            return m.group(1)
-        return None
+                col = m.group(1)
 
+                # Don't convert user column names
+                # such as "sales" into "amount"
+                alias = f"{col}_{func.lower()}"
+
+                results.append((func, col, alias))
+
+        seen = set()
+        unique = []
+
+        for item in results:
+            if item not in seen:
+                seen.add(item)
+                unique.append(item)
+
+        return unique
     # ──────────────────────────────────────────────────────────────────────
     #  HAVING
     # ──────────────────────────────────────────────────────────────────────
 
     def extract_having(self, text: str) -> Optional[str]:
-        m = re.search(r'\bhaving\s+(.+?)(?:\s+order\s+by|\s+limit|$)', text)
+        # Search for HAVING anywhere in the text
+        m = re.search(
+            r'\bhaving\s+(.+?)(?:\s+order\s+by|\s+limit|\s+offset|$)',
+            text,
+            re.IGNORECASE,
+        )
         if not m:
             return None
         cond = m.group(1).strip()
-        # Normalise natural language ops
-        cond = re.sub(r'greater\s+than\s+(\d+)', r'> \1', cond)
-        cond = re.sub(r'less\s+than\s+(\d+)',    r'< \1', cond)
-        cond = re.sub(r'([a-z_]+)\s+is\s+',      r'\1 = ', cond)
+        # Reject false positives: if the captured condition is a single word
+        # that is not a number and contains no operators, it's not a real HAVING clause.
+        if re.match(r'^[a-zA-Z_]+$', cond) and not cond.isdigit():
+            return None
+        # Normalise natural language operators
+        cond = re.sub(r'greater\s+than\s+(\d+)', r'> \1', cond, flags=re.IGNORECASE)
+        cond = re.sub(r'([a-z_]+)\s+is\s+', r'\1 = ', cond, flags=re.IGNORECASE)
         return cond
 
     # ──────────────────────────────────────────────────────────────────────
@@ -128,7 +153,6 @@ class SelectPartsExtractor:
     def extract_order_by(self, text: str) -> Optional[List[Tuple[str, str]]]:
         m = re.search(r'\border\s+by\s+(.+?)(?:\s+limit|\s+offset|$)', text)
         if not m:
-            # Natural language: "sorted by X descending"
             m2 = re.search(r'\bsorted\s+by\s+(\w+)(?:\s+(asc(?:ending)?|desc(?:ending)?))?', text)
             if m2:
                 col = m2.group(1)
@@ -154,15 +178,12 @@ class SelectPartsExtractor:
     # ──────────────────────────────────────────────────────────────────────
 
     def extract_limit(self, text: str) -> Optional[int]:
-        # "top N" / "first N"
         m = re.search(r'\b(?:top|first)\s+(\d+)\b', text)
         if m:
             return int(m.group(1))
-        # "limit N"
         m = re.search(r'\blimit\s+(\d+)\b', text)
         if m:
             return int(m.group(1))
-        # "fetch first N rows only"
         m = re.search(r'\bfetch\s+first\s+(\d+)\s+rows?\s+only\b', text)
         if m:
             return int(m.group(1))
@@ -188,7 +209,6 @@ class SelectPartsExtractor:
     ) -> Optional[Tuple[str, str, str]]:
         from ..constants import JOIN_ALIASES
 
-        # Find an explicitly mentioned second table
         other_table: Optional[str] = None
         for t in sorted(known_tables, key=len, reverse=True):
             if t != primary_table and re.search(rf'\b{re.escape(t)}\b', text, re.IGNORECASE):
@@ -198,22 +218,36 @@ class SelectPartsExtractor:
         if not other_table:
             return None
 
-        # Determine join type
         join_type = "INNER"
         for phrase, jtype in sorted(JOIN_ALIASES.items(), key=lambda kv: len(kv[0]), reverse=True):
             if phrase in text:
                 join_type = jtype
                 break
 
-        # Natural-language hint: "even if no <table>" → LEFT JOIN
         if re.search(r'\beven\s+if\s+no\b', text):
             join_type = "LEFT"
 
-        # ON condition
-        on_m = re.search(r'\bon\s+([\w.]+)\s*=\s*([\w.]+)', text)
-        if on_m:
-            on_cond = f"{on_m.group(1)} = {on_m.group(2)}"
+        # For NATURAL and CROSS joins, there is no ON clause – condition should be None
+        if join_type in ("NATURAL", "CROSS"):
+            on_cond = None
         else:
-            on_cond = f"{primary_table}.id = {other_table}.{primary_table}_id"
+            on_m = re.search(r'\bon\s+([\w.]+)\s*=\s*([\w.]+)', text)
+            if on_m:
+                on_cond = f"{on_m.group(1)} = {on_m.group(2)}"
+            else:
+                on_cond = f"{primary_table}.id = {other_table}.{primary_table}_id"
 
         return (join_type, other_table, on_cond)
+    
+    
+    def extract_group_by(self, text: str) -> Optional[str]:
+        m = re.search(r'\bgroup\s+by\s+(\w+)', text)
+        if m:
+            candidate = m.group(1)
+            # Only return the column if it's not a stop word
+            if candidate.lower() not in GROUP_BY_STOP_WORDS:
+                return candidate
+        m = re.search(r'\bper\s+(\w+)\b', text)
+        if m:
+            return m.group(1)
+        return None
