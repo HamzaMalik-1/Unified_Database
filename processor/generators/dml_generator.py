@@ -52,7 +52,7 @@ class DMLGenerator:
         known_cols = p.get_column_names(table)
         known_cols_lower = [c.lower() for c in known_cols]
 
-        # Extract column → value pairs (pass known columns to the extractor)
+        # Extract column → value pairs
         pairs = self._extract_column_value_pairs(text, known_cols_lower)
 
         # Special handlers
@@ -92,14 +92,16 @@ class DMLGenerator:
 
     def _extract_column_value_pairs(self, text: str, known_cols_lower: List[str]) -> dict:
         """
-        Extract (column, value) pairs using the known column names.
-        Works on lowercased text.
+        Extract (column, value) pairs from lowercased text.
+        A column candidate must be either a known column or a common column name.
+        A value is any non‑stopword (including lowercase words like 'nyc', 'la').
+        This ensures 'city nyc' is captured, and 'user_id 1' is captured.
         """
         pairs = {}
-        # Common column names that may not yet be in schema (for error detection)
+        # Common column names (including those that may not yet be in schema)
         common_cols = {
             "id", "name", "age", "email", "city", "address", "zip", "country",
-            "price", "amount", "quantity", "product", "region", "status"
+            "price", "amount", "quantity", "product", "region", "status", "user_id"
         }
         plausible_cols = set(known_cols_lower) | common_cols
 
@@ -131,26 +133,24 @@ class DMLGenerator:
             if word in plausible_cols:
                 if i + 1 < len(words):
                     next_word = words[i + 1]
-                    # Value can be a number, or any non‑stopword (including lowercase words like "la")
+                    # Treat any non‑stopword as a value (including numbers and lowercase words)
                     is_number = next_word.replace('.', '', 1).lstrip('-').isdigit()
                     if is_number or (next_word not in stopwords and len(next_word) >= 1):
                         col = word
                         val = next_word
                         if col not in pairs:
-                            # Preserve original casing for values? We'll keep as is (lowercase),
-                            # but the SQL engine doesn't care.
                             pairs[col] = _to_num(val)
                         i += 2
                         continue
             i += 1
 
-        # Fallback: explicit "col = value" or "col is value"
+        # Explicit "col = value" or "col is value"
         for match in re.finditer(r'\b(\w+)\s+(?:is|=)\s+([^\s]+)', text):
             col, val = match.group(1), match.group(2)
             if col in plausible_cols and col not in pairs:
                 pairs[col] = _to_num(val.strip("'\""))
 
-        # Fallback: "with col1 val1 col2 val2 ..."
+        # "with col1 val1 col2 val2 ..."
         with_match = re.search(r'\bwith\s+(.+?)(?=\s+(?:where|and|into|values)|\s*$)', text, re.IGNORECASE)
         if with_match:
             clause = with_match.group(1)
@@ -166,7 +166,7 @@ class DMLGenerator:
         return pairs
 
     # ------------------------------------------------------------------
-    # UPDATE (unchanged)
+    # UPDATE
     # ------------------------------------------------------------------
 
     def update(self, text: str) -> str:
@@ -193,7 +193,7 @@ class DMLGenerator:
         set_pairs = []
         for match in re.finditer(r'\b(\w+)\s+(?:to|=)\s+([^\s]+)', text):
             col, val = match.group(1), match.group(2)
-            if col.lower() in {"name", "age", "id", "status", "email", "city", "price", "amount", "quantity", "description"}:
+            if col.lower() in {"name", "age", "id", "status", "email", "city", "price", "amount", "quantity", "description", "user_id"}:
                 val = _to_num(val.strip("'\""))
                 set_pairs.append(f"{col} = {_quote(val)}")
 

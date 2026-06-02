@@ -105,10 +105,40 @@
   },
   "tables": {
     "product": [],
-    "order": [],
+    "order": [
+      {
+        "id": 101,
+        "price": 150.5,
+        "name": "ali"
+      }
+    ],
     "users": [
       {
         "id": 1,
+        "name": "bob",
+        "age": 25,
+        "city": "la"
+      },
+      {
+        "id": 2,
+        "name": "alice",
+        "age": 30,
+        "city": "nyc"
+      },
+      {
+        "id": 3,
+        "name": "ahmad",
+        "age": 30,
+        "city": "nyc"
+      },
+      {
+        "id": 4,
+        "name": "ahmad",
+        "age": 30,
+        "city": null
+      },
+      {
+        "id": 5,
         "name": "bob",
         "age": 25,
         "city": "la"
