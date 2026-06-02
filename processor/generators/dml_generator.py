@@ -6,7 +6,8 @@ Generates INSERT, UPDATE, DELETE commands from natural-language text.
 
 from __future__ import annotations
 import re
-from typing import Optional, TYPE_CHECKING, List, Tuple, Dict
+import json
+from typing import Optional, TYPE_CHECKING, List, Tuple, Dict, Any
 
 try:
     from word2number import w2n as _w2n
@@ -42,7 +43,10 @@ class DMLGenerator:
 
     def insert(self, text: str) -> str:
         p = self._p
-        table = p.get_table(text)
+        # First try to extract table from "to X" or "into X"
+        table = self._get_table_from_preposition(text, p.get_known_tables())
+        if not table:
+            table = p.get_table(text)   # fallback
         if not table:
             return "Error: Could not determine table name for INSERT"
         if table not in p.get_known_tables():
@@ -67,38 +71,99 @@ class DMLGenerator:
         if age_match and "age" not in pairs:
             pairs["age"] = age_match.group(1)
 
-        # Validate columns
-        valid_pairs = {}
-        invalid_cols = []
-        for col, val in pairs.items():
-            if col.lower() in known_cols_lower:
-                orig_col = next((c for c in known_cols if c.lower() == col.lower()), col)
-                valid_pairs[orig_col] = val
-            else:
-                invalid_cols.append(col)
+        # For NoSQL (schemaless) we skip column validation – accept all pairs as valid.
+        if prefix == "NOSQL":
+            valid_pairs = pairs
+            invalid_cols = []
+        else:
+            # Validate columns for SQL tables
+            valid_pairs = {}
+            invalid_cols = []
+            for col, val in pairs.items():
+                if col.lower() in known_cols_lower:
+                    orig_col = next((c for c in known_cols if c.lower() == col.lower()), col)
+                    valid_pairs[orig_col] = val
+                else:
+                    invalid_cols.append(col)
 
         # Build command
-        if valid_pairs:
-            cols_list = list(valid_pairs.keys())
-            vals_list = [_quote(v) for v in valid_pairs.values()]
-            command = f"{prefix} INSERT INTO {table} ({', '.join(cols_list)}) VALUES ({', '.join(vals_list)})"
+        if prefix == "NOSQL":
+            command = self._build_nosql_insert_command(table, valid_pairs)
         else:
-            command = f"{prefix} INSERT INTO {table} DEFAULT VALUES"
+            if valid_pairs:
+                cols_list = list(valid_pairs.keys())
+                vals_list = [_quote(v) for v in valid_pairs.values()]
+                command = f"{prefix} INSERT INTO {table} ({', '.join(cols_list)}) VALUES ({', '.join(vals_list)})"
+            else:
+                command = f"{prefix} INSERT INTO {table} DEFAULT VALUES"
 
         if invalid_cols:
             unique_invalid = list(dict.fromkeys(invalid_cols))
             return f"Error: Column(s) {', '.join(unique_invalid)} do not exist in table '{table}'. Generated command: {command}"
         return command
 
+    def _get_table_from_preposition(self, text: str, known_tables: List[str]) -> Optional[str]:
+        """
+        Extract a table name that follows the prepositions 'to' or 'into'.
+        Example: "add a sale to sales" -> returns 'sales' if it is in known_tables.
+        """
+        text_lower = text.lower()
+        for pattern in [r'\bto\s+(\w+)\b', r'\binto\s+(\w+)\b']:
+            m = re.search(pattern, text_lower)
+            if m:
+                candidate = m.group(1)
+                if candidate in known_tables:
+                    return candidate
+        return None
+
+    def _build_nosql_insert_command(self, table: str, valid_pairs: Dict[str, str]) -> str:
+        """
+        Build a NoSQL INSERT command, converting dotted column names into nested JSON objects.
+        Example: {'id': '1', 'name': 'Alice', 'address.city': 'Boston', 'address.zip': '123'}
+        becomes: INSERT INTO table (id, name, address) VALUES (1, 'Alice', {"city":"Boston","zip":123})
+        """
+        flat_cols = {}
+        nested_groups = {}  # root -> dict of subfield -> value
+
+        for col, val in valid_pairs.items():
+            if '.' in col:
+                root, sub = col.split('.', 1)
+                if root not in nested_groups:
+                    nested_groups[root] = {}
+                nested_groups[root][sub] = self._to_json_value(val)
+            else:
+                flat_cols[col] = val
+
+        final_cols = list(flat_cols.keys()) + list(nested_groups.keys())
+        final_vals = []
+        for col in flat_cols:
+            final_vals.append(_quote(flat_cols[col]))
+        for root, sub_dict in nested_groups.items():
+            json_str = json.dumps(sub_dict)
+            json_str_single = json_str.replace('"', "'")
+            final_vals.append(f"'{json_str_single}'")
+
+        if final_cols:
+            cols_part = ", ".join(final_cols)
+            vals_part = ", ".join(final_vals)
+            return f"NOSQL INSERT INTO {table} ({cols_part}) VALUES ({vals_part})"
+        else:
+            return f"NOSQL INSERT INTO {table} DEFAULT VALUES"
+
+    def _to_json_value(self, val: str) -> Any:
+        if val.lstrip('-').isdigit():
+            return int(val)
+        try:
+            return float(val)
+        except ValueError:
+            return val
+
+    # ------------------------------------------------------------------
+    # EXTRACTION (unchanged)
+    # ------------------------------------------------------------------
+
     def _extract_column_value_pairs(self, text: str, known_cols_lower: List[str]) -> dict:
-        """
-        Extract (column, value) pairs from lowercased text.
-        A column candidate must be either a known column or a common column name.
-        A value is any non‑stopword (including lowercase words like 'nyc', 'la').
-        This ensures 'city nyc' is captured, and 'user_id 1' is captured.
-        """
         pairs = {}
-        # Common column names (including those that may not yet be in schema)
         common_cols = {
             "id", "name", "age", "email", "city", "address", "zip", "country",
             "price", "amount", "quantity", "product", "region", "status", "user_id"
@@ -124,33 +189,24 @@ class DMLGenerator:
         i = 0
         while i < len(words):
             word = words[i]
-            # Skip stopwords and very short words
             if word in stopwords or len(word) < 2:
                 i += 1
                 continue
-
-            # If this word is a plausible column name
-            if word in plausible_cols:
-                if i + 1 < len(words):
-                    next_word = words[i + 1]
-                    # Treat any non‑stopword as a value (including numbers and lowercase words)
-                    is_number = next_word.replace('.', '', 1).lstrip('-').isdigit()
-                    if is_number or (next_word not in stopwords and len(next_word) >= 1):
-                        col = word
-                        val = next_word
-                        if col not in pairs:
-                            pairs[col] = _to_num(val)
-                        i += 2
-                        continue
+            if word in plausible_cols and i + 1 < len(words):
+                next_word = words[i + 1]
+                is_number = next_word.replace('.', '', 1).lstrip('-').isdigit()
+                if is_number or (next_word not in stopwords and len(next_word) >= 1):
+                    if word not in pairs:
+                        pairs[word] = _to_num(next_word)
+                    i += 2
+                    continue
             i += 1
 
-        # Explicit "col = value" or "col is value"
         for match in re.finditer(r'\b(\w+)\s+(?:is|=)\s+([^\s]+)', text):
             col, val = match.group(1), match.group(2)
             if col in plausible_cols and col not in pairs:
                 pairs[col] = _to_num(val.strip("'\""))
 
-        # "with col1 val1 col2 val2 ..."
         with_match = re.search(r'\bwith\s+(.+?)(?=\s+(?:where|and|into|values)|\s*$)', text, re.IGNORECASE)
         if with_match:
             clause = with_match.group(1)
@@ -162,7 +218,6 @@ class DMLGenerator:
                 if col in plausible_cols and col not in pairs:
                     pairs[col] = _to_num(raw_val)
                 i += 2
-
         return pairs
 
     # ------------------------------------------------------------------
@@ -171,7 +226,9 @@ class DMLGenerator:
 
     def update(self, text: str) -> str:
         p = self._p
-        table = p.get_table(text)
+        table = self._get_table_from_preposition(text, p.get_known_tables())
+        if not table:
+            table = p.get_table(text)
         if not table:
             return "Error: Could not determine table name for UPDATE"
         if table not in p.get_known_tables():
@@ -189,7 +246,6 @@ class DMLGenerator:
             where_part = f" WHERE {where}" if where else ""
             return f"NOSQL UPDATE {table} SET {field} {op} {val}{where_part}"
 
-        # Standard UPDATE
         set_pairs = []
         for match in re.finditer(r'\b(\w+)\s+(?:to|=)\s+([^\s]+)', text):
             col, val = match.group(1), match.group(2)
@@ -209,7 +265,9 @@ class DMLGenerator:
 
     def delete(self, text: str) -> str:
         p = self._p
-        table = p.get_table(text)
+        table = self._get_table_from_preposition(text, p.get_known_tables())
+        if not table:
+            table = p.get_table(text)
         if not table:
             return "Error: Could not determine table name for DELETE"
         if table not in p.get_known_tables():

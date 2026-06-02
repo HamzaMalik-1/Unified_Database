@@ -224,7 +224,7 @@ class DDLGenerator:
         m = re.search(
             r'create\s+trigger\s+(\w+)\s+(before|after)\s+(insert|update|delete)'
             r'\s+on\s+(\w+)\s+for\s+each\s+row\s+begin\s+(.+?)\s+end',
-            text, re.DOTALL,
+            text, re.DOTALL | re.IGNORECASE,
         )
         if m:
             name, timing, event, table, stmt = (

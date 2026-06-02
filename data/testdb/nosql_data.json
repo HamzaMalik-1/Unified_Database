@@ -2,8 +2,45 @@
   "schemas": {},
   "tables": {},
   "collections": {
-    "nosql_users": [],
-    "sales": [],
+    "nosql_users": [
+      {
+        "id": 1,
+        "name": "alice",
+        "address.city": "boston"
+      },
+      {
+        "id": 1,
+        "name": "alice",
+        "address.city": "boston"
+      },
+      {
+        "id": 1,
+        "name": "alice",
+        "address": "{'city': 'boston'}"
+      },
+      {
+        "id": 2,
+        "name": "bob",
+        "address": "{'city': 'new'}"
+      },
+      {
+        "id": 2,
+        "name": "bob",
+        "address": "{'city': 'new'}"
+      },
+      {
+        "id": 1,
+        "name": "alice",
+        "address": "{'city': 'boston'}"
+      }
+    ],
+    "sales": [
+      {
+        "product": "phone",
+        "region": "south",
+        "amount": 600
+      }
+    ],
     "docs": []
   },
   "nosql_indexes": {},
