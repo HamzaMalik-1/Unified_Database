@@ -32,6 +32,11 @@
         "id": 1,
         "name": "alice",
         "address": "{'city': 'boston'}"
+      },
+      {
+        "id": 1,
+        "name": "alice",
+        "address": "{'city': 'boston'}"
       }
     ],
     "sales": [
@@ -39,9 +44,26 @@
         "product": "phone",
         "region": "south",
         "amount": 600
+      },
+      {
+        "product": "phone",
+        "region": "south",
+        "amount": 600
       }
     ],
-    "docs": []
+    "docs": [
+      {
+        "id": 1
+      },
+      {
+        "id": 1,
+        "content": "the quick brown fox"
+      },
+      {
+        "id": 1,
+        "content": "the quick brown fox"
+      }
+    ]
   },
   "nosql_indexes": {},
   "text_indexes": {}

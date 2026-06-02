@@ -103,10 +103,6 @@ class DMLGenerator:
         return command
 
     def _get_table_from_preposition(self, text: str, known_tables: List[str]) -> Optional[str]:
-        """
-        Extract a table name that follows the prepositions 'to' or 'into'.
-        Example: "add a sale to sales" -> returns 'sales' if it is in known_tables.
-        """
         text_lower = text.lower()
         for pattern in [r'\bto\s+(\w+)\b', r'\binto\s+(\w+)\b']:
             m = re.search(pattern, text_lower)
@@ -117,14 +113,8 @@ class DMLGenerator:
         return None
 
     def _build_nosql_insert_command(self, table: str, valid_pairs: Dict[str, str]) -> str:
-        """
-        Build a NoSQL INSERT command, converting dotted column names into nested JSON objects.
-        Example: {'id': '1', 'name': 'Alice', 'address.city': 'Boston', 'address.zip': '123'}
-        becomes: INSERT INTO table (id, name, address) VALUES (1, 'Alice', {"city":"Boston","zip":123})
-        """
         flat_cols = {}
-        nested_groups = {}  # root -> dict of subfield -> value
-
+        nested_groups = {}
         for col, val in valid_pairs.items():
             if '.' in col:
                 root, sub = col.split('.', 1)
@@ -159,14 +149,16 @@ class DMLGenerator:
             return val
 
     # ------------------------------------------------------------------
-    # EXTRACTION (unchanged)
+    # EXTRACTION (handles quoted multi-word values)
     # ------------------------------------------------------------------
 
     def _extract_column_value_pairs(self, text: str, known_cols_lower: List[str]) -> dict:
         pairs = {}
+        # Add common text fields for document/content
         common_cols = {
             "id", "name", "age", "email", "city", "address", "zip", "country",
-            "price", "amount", "quantity", "product", "region", "status", "user_id"
+            "price", "amount", "quantity", "product", "region", "status", "user_id",
+            "content", "title", "body", "text", "description"
         }
         plausible_cols = set(known_cols_lower) | common_cols
 
@@ -185,43 +177,74 @@ class DMLGenerator:
             "me", "him", "her", "it", "them"
         }
 
-        words = re.findall(r'[^\s]+', text)
+        # Tokenize respecting quoted strings
+        def tokenize(s: str) -> List[str]:
+            tokens = []
+            in_quote = False
+            quote_char = None
+            current = []
+            for ch in s:
+                if (ch == "'" or ch == '"') and not in_quote:
+                    in_quote = True
+                    quote_char = ch
+                    current.append(ch)
+                elif ch == quote_char and in_quote:
+                    current.append(ch)
+                    tokens.append(''.join(current))
+                    current = []
+                    in_quote = False
+                elif ch.isspace() and not in_quote:
+                    if current:
+                        tokens.append(''.join(current))
+                        current = []
+                else:
+                    current.append(ch)
+            if current:
+                tokens.append(''.join(current))
+            return tokens
+
+        tokens = tokenize(text)
         i = 0
-        while i < len(words):
-            word = words[i]
-            if word in stopwords or len(word) < 2:
+        while i < len(tokens):
+            token = tokens[i]
+            if token in stopwords or len(token) < 2:
                 i += 1
                 continue
-            if word in plausible_cols and i + 1 < len(words):
-                next_word = words[i + 1]
-                is_number = next_word.replace('.', '', 1).lstrip('-').isdigit()
-                if is_number or (next_word not in stopwords and len(next_word) >= 1):
-                    if word not in pairs:
-                        pairs[word] = _to_num(next_word)
+            if token in plausible_cols and i + 1 < len(tokens):
+                next_token = tokens[i + 1]
+                is_number = next_token.replace('.', '', 1).lstrip('-').isdigit()
+                if is_number or (next_token not in stopwords and len(next_token) >= 1):
+                    col = token
+                    val = next_token.strip("'\"")
+                    if col not in pairs:
+                        pairs[col] = _to_num(val)
                     i += 2
                     continue
             i += 1
 
+        # Explicit "col = value" or "col is value"
         for match in re.finditer(r'\b(\w+)\s+(?:is|=)\s+([^\s]+)', text):
             col, val = match.group(1), match.group(2)
             if col in plausible_cols and col not in pairs:
                 pairs[col] = _to_num(val.strip("'\""))
 
+        # "with col1 val1 col2 val2 ..."
         with_match = re.search(r'\bwith\s+(.+?)(?=\s+(?:where|and|into|values)|\s*$)', text, re.IGNORECASE)
         if with_match:
             clause = with_match.group(1)
-            tokens = re.findall(r'[^\s]+', clause)
+            tokens2 = tokenize(clause)
             i = 0
-            while i + 1 < len(tokens):
-                col = tokens[i].rstrip(',')
-                raw_val = tokens[i + 1].strip("'\"")
+            while i + 1 < len(tokens2):
+                col = tokens2[i].rstrip(',')
+                raw_val = tokens2[i + 1].strip("'\"")
                 if col in plausible_cols and col not in pairs:
                     pairs[col] = _to_num(raw_val)
                 i += 2
+
         return pairs
 
     # ------------------------------------------------------------------
-    # UPDATE
+    # UPDATE (unchanged)
     # ------------------------------------------------------------------
 
     def update(self, text: str) -> str:
@@ -236,7 +259,6 @@ class DMLGenerator:
 
         prefix = p.get_prefix(table)
 
-        # NoSQL array operators
         nosql_op = self._detect_nosql_array_op(text)
         if nosql_op:
             op, val = nosql_op
@@ -260,7 +282,7 @@ class DMLGenerator:
         return f"{prefix} UPDATE {table}"
 
     # ------------------------------------------------------------------
-    # DELETE
+    # DELETE (unchanged)
     # ------------------------------------------------------------------
 
     def delete(self, text: str) -> str:
