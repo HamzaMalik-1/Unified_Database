@@ -21,6 +21,12 @@
         "constraints": [],
         "default": null,
         "auto_increment": false
+      },
+      {
+        "name": "status",
+        "type": "TEXT",
+        "constraints": [],
+        "default": "active"
       }
     ],
     "order": [
@@ -106,12 +112,14 @@
       {
         "id": 2,
         "name": "Bob",
-        "city": "abc"
+        "city": "abc",
+        "status": "active"
       },
       {
         "id": 3,
         "name": "Alice",
-        "city": "abc"
+        "city": "abc",
+        "status": "active"
       }
     ],
     "order": [
