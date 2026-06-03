@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 class SelectGenerator:
 
     def __init__(self, processor: "NLPProcessor"):
-        self._p = processor   # back-reference to access all extractors & catalog helpers
+        self._p = processor
 
     # ──────────────────────────────────────────────────────────────────────
     #  Public entry point
@@ -25,6 +25,26 @@ class SelectGenerator:
 
     def generate(self, text: str) -> Optional[str]:
         p = self._p
+
+        # ------------------------------------------------------------------
+        #  DIRECT HANDLERS for common aggregate patterns
+        # ------------------------------------------------------------------
+        # 1. "show count X by Y having count > Z"
+        direct_result = self._handle_aggregate_count(text)
+        if direct_result:
+            return direct_result
+
+        # 2. "show average age group by city" etc.
+        direct_result = self._handle_aggregate_general(text)
+        if direct_result:
+            return direct_result
+
+        # ------------------------------------------------------------------
+        #  Pre‑process: rewrite "count X ..." or "show count X ..." to
+        #  "select count(*) from X ..." (fallback, may not be needed now)
+        # ------------------------------------------------------------------
+        original_text = text
+        text = self._preprocess_aggregate_query(text)
 
         # ── Set-ops: UNION / INTERSECT / EXCEPT ──────────────────────────
         for keyword in ("union", "intersect", "except"):
@@ -58,8 +78,18 @@ class SelectGenerator:
                 return f"{prefix} WITH {cte_name} AS ({ic}) {mc}"
             return None
 
-        # ── Table identification ──────────────────────────────────────────
-        table = p.get_table(text)
+        # ── Strip trailing "order by" and "limit/offset" for join detection ──
+        base_text, order_by_str, limit_str = self._strip_trailing_clauses(text)
+
+        # Special handling for "bottom N" (not captured by standard limit extraction)
+        if not limit_str:
+            bottom_match = re.search(r'\bbottom\s+(\d+)\b', text.lower())
+            if bottom_match:
+                limit_str = bottom_match.group(1)
+                order_by_str = ""   # will be set later to ASC
+
+        # ── Table identification using stripped text ───────────────────────
+        table = p.get_table(base_text)
         if not table:
             return None
 
@@ -69,51 +99,49 @@ class SelectGenerator:
 
         prefix = p.get_prefix(table)
 
-        # ── JOIN ──────────────────────────────────────────────────────────
-        join_info = p.select_parts.extract_join(text, table, known_tables)
+        # ── JOIN (using stripped text) ─────────────────────────────────────
+        join_info = p.select_parts.extract_join(base_text, table, known_tables)
         if join_info:
             join_type, other_table, join_cond = join_info
             cmd = f"{prefix} SELECT * FROM {table} {join_type} JOIN {other_table} ON {join_cond}"
-            where = p.conditions.extract(text)
+            where = p.conditions.extract(base_text)
             if where:
                 cmd += f" WHERE {where}"
-            order = p.select_parts.extract_order_by(text)
-            if order:
-                cmd += " ORDER BY " + ", ".join(f"{c} {d}" for c, d in order)
-            limit = p.select_parts.extract_limit(text)
-            if limit:
-                cmd += f" LIMIT {limit}"
+            if order_by_str:
+                cmd += f" ORDER BY {order_by_str}"
+            if limit_str:
+                cmd += f" LIMIT {limit_str}"
             return cmd
 
-        # ── Subquery (EXISTS / IN) ────────────────────────────────────────
-        sub = self._detect_subquery(text, table, known_tables)
+        # ── Subquery (EXISTS / IN) using stripped text ─────────────────────
+        sub = self._detect_subquery(base_text, table, known_tables)
         if sub:
             sub_type, outer_col, inner_sql = sub
             if sub_type == "EXISTS":
                 cmd = f"{prefix} SELECT * FROM {table} WHERE EXISTS ({inner_sql})"
             else:  # IN
                 cmd = f"{prefix} SELECT * FROM {table} WHERE {outer_col} IN ({inner_sql})"
-            order = p.select_parts.extract_order_by(text)
-            if order:
-                cmd += " ORDER BY " + ", ".join(f"{c} {d}" for c, d in order)
-            limit = p.select_parts.extract_limit(text)
-            if limit:
-                cmd += f" LIMIT {limit}"
+            if order_by_str:
+                cmd += f" ORDER BY {order_by_str}"
+            if limit_str:
+                cmd += f" LIMIT {limit_str}"
             return cmd
 
-        # ── Regular SELECT ────────────────────────────────────────────────
+        # ── Regular SELECT (using stripped text) ───────────────────────────
         known_cols  = p.get_column_names(table)
-        columns     = p.select_parts.extract_columns(text, table, known_cols)
-        distinct    = p.select_parts.extract_distinct(text)
-        aggregates  = p.select_parts.extract_aggregates(text)
-        group_by    = p.select_parts.extract_group_by(text)
+        columns     = p.select_parts.extract_columns(base_text, table, known_cols)
+        distinct    = p.select_parts.extract_distinct(base_text)
+        aggregates  = p.select_parts.extract_aggregates(base_text)
+        group_by    = p.select_parts.extract_group_by(base_text)
 
         # Build SELECT clause
         if aggregates:
-            agg_parts = [
-                f"{func}(*) AS {alias}" if col == "*" else f"{func}({col}) AS {alias}"
-                for func, col, alias in aggregates
-            ]
+            agg_parts = []
+            for func, col, alias in aggregates:
+                if col == "*":
+                    agg_parts.append(f"{func}(*) AS {alias}")
+                else:
+                    agg_parts.append(f"{func}({col}) AS {alias}")
             select_clause = ", ".join(agg_parts)
             if group_by:
                 select_clause += f", {group_by}"
@@ -126,49 +154,248 @@ class SelectGenerator:
 
         cmd = f"{prefix} SELECT {select_clause} FROM {table}"
 
-        # WHERE
-        where = p.conditions.extract(text)
+        # WHERE (from base text)
+        where = p.conditions.extract(base_text)
         if where:
             cmd += f" WHERE {where}"
 
         # GROUP BY / HAVING
         if group_by:
             cmd += f" GROUP BY {group_by}"
-            having = p.select_parts.extract_having(text)
+            having = p.select_parts.extract_having(base_text)
             if having:
+                # Convert "count > 1" to "count(*) > 1" if needed
+                having = self._normalize_having(having)
                 cmd += f" HAVING {having}"
 
-        # ORDER BY
-        order = p.select_parts.extract_order_by(text)
-        if order:
-            cmd += " ORDER BY " + ", ".join(f"{c} {d}" for c, d in order)
-        else:
-            limit = p.select_parts.extract_limit(text)
-            if limit:
-                # Implicit sort for TOP N
-                if aggregates:
-                    order_col = aggregates[0][1] if aggregates[0][1] != "*" else "id"
-                elif columns:
-                    order_col = columns[0]
+        # ── Handle "top N" and "bottom N" (if no explicit ORDER BY) ─────────
+        if not order_by_str and limit_str:
+            text_lower = original_text.lower()
+            # Determine default sort column (prefer 'id', else first column)
+            default_sort_col = "id"
+            if known_cols:
+                for col in known_cols:
+                    if col.lower() == "id":
+                        default_sort_col = col
+                        break
                 else:
-                    order_col = "id"
-                cmd += f" ORDER BY {order_col} DESC"
+                    default_sort_col = known_cols[0]
 
-        # LIMIT / OFFSET
-        limit  = p.select_parts.extract_limit(text)
-        offset = p.select_parts.extract_offset(text)
-        if limit:
-            cmd += f" LIMIT {offset}, {limit}" if offset else f" LIMIT {limit}"
+            if re.search(r'\btop\s+\d+\b', text_lower):
+                order_by_str = f"{default_sort_col} DESC"
+            elif re.search(r'\bbottom\s+\d+\b', text_lower):
+                order_by_str = f"{default_sort_col} ASC"
+
+        # Append ORDER BY and LIMIT
+        if order_by_str:
+            cmd += f" ORDER BY {order_by_str}"
+        if limit_str:
+            cmd += f" LIMIT {limit_str}"
 
         return cmd
+
+    # ------------------------------------------------------------------
+    #  DIRECT HANDLER for "show average age group by city"
+    # ------------------------------------------------------------------
+    def _handle_aggregate_general(self, text: str) -> Optional[str]:
+        """
+        Parses queries like:
+          - "show average age group by city"
+          - "show avg age group by city"
+          - "show sum amount group by region"
+          - "show total amount group by region"
+        Returns SQL command or None.
+        """
+        text_lower = text.lower().strip()
+        words = text_lower.split()
+        if not words or words[0] != "show":
+            return None
+        if len(words) < 4:
+            return None
+
+        # Map aggregate aliases to SQL functions
+        agg_map = {
+            "average": "AVG",
+            "avg": "AVG",
+            "sum": "SUM",
+            "total": "SUM",
+            "count": "COUNT",
+            "min": "MIN",
+            "maximum": "MAX",
+            "max": "MAX",
+        }
+
+        agg_word = words[1]
+        if agg_word not in agg_map:
+            return None
+        agg_func = agg_map[agg_word]
+
+        # The next word is the column name
+        if len(words) < 3:
+            return None
+        column = words[2]
+
+        # Look for "group by"
+        group_by_idx = None
+        for i, w in enumerate(words):
+            if w == "group" and i+1 < len(words) and words[i+1] == "by":
+                group_by_idx = i + 2
+                break
+        if group_by_idx is None or group_by_idx >= len(words):
+            return None
+        group_col = words[group_by_idx]
+
+        # Find table: first look for a known table name in the text
+        known_tables = self._p.get_known_tables()
+        candidate_table = None
+        for t in known_tables:
+            if t in text_lower:
+                candidate_table = t
+                break
+        # If not found, look for a table that has both the column and group_col
+        if candidate_table is None:
+            for t in known_tables:
+                cols = self._p.get_column_names(t)
+                if column in cols and group_col in cols:
+                    candidate_table = t
+                    break
+        if candidate_table is None:
+            # Fallback to the first known table (if any)
+            if known_tables:
+                candidate_table = known_tables[0]
+            else:
+                return None
+
+        prefix = self._p.get_prefix(candidate_table)
+        alias = f"{agg_word}_{column}" if agg_word != "count" else "total"
+        return f"{prefix} SELECT {agg_func}({column}) AS {alias}, {group_col} FROM {candidate_table} GROUP BY {group_col}"
+
+    # ------------------------------------------------------------------
+    #  DIRECT HANDLER for "show count X by Y having count > Z"
+    # ------------------------------------------------------------------
+    def _handle_aggregate_count(self, text: str) -> Optional[str]:
+        """
+        Parses queries like:
+          - "show count orders by user_id having count > 1"
+          - "count orders by user_id having count > 1"
+        Handles singular/plural (e.g., 'orders' -> 'order').
+        """
+        words = text.lower().split()
+        if not words:
+            return None
+
+        idx = 0
+        if words[0] == "show":
+            idx = 1
+        if idx >= len(words) or words[idx] != "count":
+            return None
+        idx += 1
+        if idx >= len(words):
+            return None
+
+        candidate = words[idx]
+        known_tables = self._p.get_known_tables()
+        table = None
+        if candidate in known_tables:
+            table = candidate
+        else:
+            singular = candidate.rstrip('s')
+            if singular in known_tables:
+                table = singular
+        if table is None:
+            return None
+
+        idx += 1
+        if idx >= len(words) or words[idx] != "by":
+            return None
+        idx += 1
+        if idx >= len(words):
+            return None
+        group_col = words[idx]
+        idx += 1
+
+        threshold = None
+        if idx + 3 < len(words) and words[idx] == "having" and words[idx+1] == "count" and words[idx+2] == ">":
+            try:
+                threshold = int(words[idx+3])
+            except ValueError:
+                pass
+
+        prefix = self._p.get_prefix(table)
+        if threshold is not None:
+            return f"{prefix} SELECT COUNT(*) AS total, {group_col} FROM {table} GROUP BY {group_col} HAVING COUNT(*) > {threshold}"
+        else:
+            return f"{prefix} SELECT COUNT(*) AS total, {group_col} FROM {table} GROUP BY {group_col}"
+
+    # ------------------------------------------------------------------
+    #  Helper: preprocess "count X ..." or "show count X ..." to
+    #  "select count(*) from X ..." (legacy, kept for safety)
+    # ------------------------------------------------------------------
+    def _preprocess_aggregate_query(self, text: str) -> str:
+        """Rewrite 'show count orders by user_id ...' to 'select count(*) from orders ...'."""
+        text_lower = text.lower().strip()
+        known_tables = self._p.get_known_tables()
+        count_match = re.match(r'^(?:show\s+)?count\s+(\w+)(.*)$', text_lower)
+        if count_match:
+            candidate_table = count_match.group(1)
+            rest = count_match.group(2).strip()
+            if candidate_table in known_tables:
+                by_match = re.search(r'\bby\s+(\w+)', rest)
+                if by_match:
+                    group_col = by_match.group(1)
+                    rest_without_by = rest[:by_match.start()] + rest[by_match.end():]
+                    new_text = f"select count(*) from {candidate_table} {rest_without_by} group by {group_col}"
+                else:
+                    new_text = f"select count(*) from {candidate_table} {rest}"
+                return new_text
+        return text
+
+    # ------------------------------------------------------------------
+    #  Normalise HAVING clause (e.g., "count > 1" -> "count(*) > 1")
+    # ------------------------------------------------------------------
+    def _normalize_having(self, having: str) -> str:
+        having = re.sub(r'\bcount\s+', 'count(*) ', having, flags=re.IGNORECASE)
+        return having
+
+    # ──────────────────────────────────────────────────────────────────────
+    #  Helper: strip "order by" and "limit/offset" from the query
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _strip_trailing_clauses(self, text: str):
+        p = self._p
+        order_by_list = p.select_parts.extract_order_by(text)
+        order_by_str = ""
+        if order_by_list:
+            order_by_str = ", ".join(f"{col} {dir}" for col, dir in order_by_list)
+
+        limit_val = p.select_parts.extract_limit(text)
+        offset_val = p.select_parts.extract_offset(text)
+        limit_str = ""
+        if limit_val:
+            if offset_val:
+                limit_str = f"{offset_val}, {limit_val}"
+            else:
+                limit_str = str(limit_val)
+
+        stripped = text
+        order_match = re.search(r'\border\s+by\s+[^;]+?(?=\s+limit\b|\s*$)', stripped, re.IGNORECASE)
+        if order_match:
+            stripped = stripped[:order_match.start()] + stripped[order_match.end():]
+        limit_match = re.search(r'\blimit\s+\d+(?:\s*,\s*\d+|\s+offset\s+\d+)?', stripped, re.IGNORECASE)
+        if limit_match:
+            stripped = stripped[:limit_match.start()] + stripped[limit_match.end():]
+        offset_match = re.search(r'\boffset\s+\d+', stripped, re.IGNORECASE)
+        if offset_match:
+            stripped = stripped[:offset_match.start()] + stripped[offset_match.end():]
+
+        stripped = stripped.strip()
+        return stripped, order_by_str, limit_str
 
     # ──────────────────────────────────────────────────────────────────────
     #  Subquery detection
     # ──────────────────────────────────────────────────────────────────────
 
     def _detect_subquery(self, text, main_table, known_tables):
-        """Return (type, outer_col, inner_sql) or None."""
-        # Pattern: "users who have/placed orders"
         if re.search(r'\b(?:who|that)\s+(?:have|has|placed|made|bought|purchased|ordered)\b', text):
             for t in known_tables:
                 if t != main_table and re.search(rf'\b{re.escape(t)}\b', text, re.IGNORECASE):
