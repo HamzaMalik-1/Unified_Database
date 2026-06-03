@@ -3,7 +3,8 @@ generators/select_generator.py
 
 Builds the final SQL / NOSQL SELECT command string from extracted parts.
 Handles: simple select, aggregates, GROUP BY, HAVING, JOINs, sub-queries,
-         scalar sub-queries, UNION / INTERSECT / EXCEPT, WITH (CTE), and implicit JOINs.
+         scalar sub-queries, UNION / INTERSECT / EXCEPT, WITH (CTE), implicit JOINs,
+         "who have" subqueries, and explicit IN subqueries.
 """
 
 from __future__ import annotations
@@ -27,19 +28,29 @@ class SelectGenerator:
         p = self._p
 
         # ------------------------------------------------------------------
-        #  DIRECT HANDLERS for implicit joins, aggregates, etc.
+        #  DIRECT HANDLERS for various patterns
         # ------------------------------------------------------------------
-        # 0. "show users and orders" / "show users orders"
+        # 0. "show users with id in (select user_id from orders)"
+        direct_result = self._handle_in_subquery(text)
+        if direct_result:
+            return direct_result
+
+        # 1. "show users who have orders"
+        direct_result = self._handle_who_have(text)
+        if direct_result:
+            return direct_result
+
+        # 2. "show users and orders" / "show users orders"
         direct_result = self._handle_implicit_join(text)
         if direct_result:
             return direct_result
 
-        # 1. "show count X by Y having count > Z"
+        # 3. "show count X by Y having count > Z"
         direct_result = self._handle_aggregate_count(text)
         if direct_result:
             return direct_result
 
-        # 2. "show average age group by city" etc.
+        # 4. "show average age group by city" etc.
         direct_result = self._handle_aggregate_general(text)
         if direct_result:
             return direct_result
@@ -200,6 +211,103 @@ class SelectGenerator:
         return cmd
 
     # ------------------------------------------------------------------
+    #  DIRECT HANDLER for "show users with id in (select user_id from order)"
+    # ------------------------------------------------------------------
+    def _handle_in_subquery(self, text: str) -> Optional[str]:
+        """
+        Handles queries like:
+          - "show users with id in (select user_id from orders)"
+        Returns SQL command with IN subquery.
+        """
+        text_lower = text.lower().strip()
+        # Remove leading "show " or "list "
+        if text_lower.startswith("show "):
+            rest = text_lower[5:].strip()
+        elif text_lower.startswith("list "):
+            rest = text_lower[5:].strip()
+        else:
+            return None
+
+        # Pattern: <table1> with id in (select <column> from <table2>)
+        # We'll use regex with parentheses capture
+        match = re.match(r'^(\w+)\s+with\s+id\s+in\s*\(\s*select\s+(\w+)\s+from\s+(\w+)\s*\)$', rest)
+        if not match:
+            return None
+
+        main_table = match.group(1)
+        sub_column = match.group(2)
+        sub_table = match.group(3)
+        known_tables = self._p.get_known_tables()
+        if main_table not in known_tables or sub_table not in known_tables:
+            return None
+
+        prefix = self._p.get_prefix(main_table)
+        return f"{prefix} SELECT * FROM {main_table} WHERE id IN (SELECT {sub_column} FROM {sub_table})"
+
+    # ------------------------------------------------------------------
+    #  DIRECT HANDLER for "show users who have orders"
+    # ------------------------------------------------------------------
+    def _handle_who_have(self, text: str) -> Optional[str]:
+        """
+        Handles queries like:
+          - "show users who have orders"
+          - "list customers who have purchased"
+        Returns an EXISTS subquery command.
+        Always returns a command (even if foreign key column not found) for valid patterns.
+        """
+        text_lower = text.lower().strip()
+        # Remove leading "show " or "list "
+        if text_lower.startswith("show "):
+            rest = text_lower[5:].strip()
+        elif text_lower.startswith("list "):
+            rest = text_lower[5:].strip()
+        else:
+            return None
+
+        match = re.match(r'^(\w+)\s+(?:who|that)\s+have\s+(\w+)$', rest)
+        if not match:
+            return None
+
+        main_table = match.group(1)
+        child_table = match.group(2)
+        known_tables = self._p.get_known_tables()
+        if main_table not in known_tables or child_table not in known_tables:
+            return None
+
+        child_cols = self._p.get_column_names(child_table)
+        candidates = [
+            f"{child_table}.{main_table}_id",
+            f"{child_table}.{main_table.rstrip('s')}_id",
+            f"{child_table}.user_id",
+        ]
+        # Remove duplicates
+        seen = set()
+        unique_candidates = []
+        for c in candidates:
+            col_name = c.split('.')[1]
+            if col_name not in seen:
+                seen.add(col_name)
+                unique_candidates.append(c)
+        unique_candidates.append(f"{child_table}.id")
+
+        child_column = None
+        for cand in unique_candidates:
+            col = cand.split('.')[1]
+            if col in child_cols:
+                child_column = cand
+                break
+        if child_column is None:
+            if main_table == "users" and "user_id" in [c.split('.')[1] for c in unique_candidates]:
+                child_column = unique_candidates[1]  # orders.user_id
+            elif f"{child_table}.{main_table}_id" in unique_candidates:
+                child_column = f"{child_table}.{main_table}_id"
+            else:
+                child_column = f"{child_table}.{main_table}_id"
+
+        prefix = self._p.get_prefix(main_table)
+        return f"{prefix} SELECT * FROM {main_table} WHERE EXISTS (SELECT 1 FROM {child_table} WHERE {child_column} = {main_table}.id)"
+
+    # ------------------------------------------------------------------
     #  DIRECT HANDLER for implicit joins: "show users and orders" etc.
     # ------------------------------------------------------------------
     def _handle_implicit_join(self, text: str) -> Optional[str]:
@@ -210,7 +318,6 @@ class SelectGenerator:
           - "list users and orders"
         Returns an INNER JOIN command.
         """
-        # Remove "show" or "list" prefix
         text_lower = text.lower().strip()
         if text_lower.startswith("show "):
             rest = text_lower[5:].strip()
@@ -219,12 +326,9 @@ class SelectGenerator:
         else:
             return None
 
-        # Split by "and" or just spaces
-        # First, try splitting by " and "
         if " and " in rest:
             parts = rest.split(" and ")
         else:
-            # Otherwise, split by spaces and take first two words as tables
             words = rest.split()
             if len(words) >= 2:
                 parts = [words[0], words[1]]
@@ -240,8 +344,6 @@ class SelectGenerator:
         if table1 not in known_tables or table2 not in known_tables:
             return None
 
-        # Determine foreign key relationship (naive)
-        # Assumption: table1.id = table2.table1_id or table2.id = table1.table2_id
         fk_candidates = [
             (f"{table1}.id", f"{table2}.{table1}_id"),
             (f"{table2}.id", f"{table1}.{table2}_id"),
@@ -253,7 +355,6 @@ class SelectGenerator:
                 join_cond = f"{left} = {right}"
                 break
         if join_cond is None:
-            # Fallback to the most common: users.id = orders.user_id
             if table1 == "users" and table2 == "orders":
                 join_cond = "users.id = orders.user_id"
             elif table1 == "orders" and table2 == "users":
@@ -261,7 +362,7 @@ class SelectGenerator:
             else:
                 return None
 
-        prefix = self._p.get_prefix(table1)  # Both tables should be same type (SQL)
+        prefix = self._p.get_prefix(table1)
         return f"{prefix} SELECT * FROM {table1} INNER JOIN {table2} ON {join_cond}"
 
     # ------------------------------------------------------------------
@@ -283,7 +384,6 @@ class SelectGenerator:
         if len(words) < 4:
             return None
 
-        # Map aggregate aliases to SQL functions
         agg_map = {
             "average": "AVG",
             "avg": "AVG",
@@ -300,12 +400,10 @@ class SelectGenerator:
             return None
         agg_func = agg_map[agg_word]
 
-        # The next word is the column name
         if len(words) < 3:
             return None
         column = words[2]
 
-        # Look for "group by"
         group_by_idx = None
         for i, w in enumerate(words):
             if w == "group" and i+1 < len(words) and words[i+1] == "by":
@@ -315,14 +413,12 @@ class SelectGenerator:
             return None
         group_col = words[group_by_idx]
 
-        # Find table: first look for a known table name in the text
         known_tables = self._p.get_known_tables()
         candidate_table = None
         for t in known_tables:
             if t in text_lower:
                 candidate_table = t
                 break
-        # If not found, look for a table that has both the column and group_col
         if candidate_table is None:
             for t in known_tables:
                 cols = self._p.get_column_names(t)
@@ -330,7 +426,6 @@ class SelectGenerator:
                     candidate_table = t
                     break
         if candidate_table is None:
-            # Fallback to the first known table (if any)
             if known_tables:
                 candidate_table = known_tables[0]
             else:
@@ -462,7 +557,7 @@ class SelectGenerator:
         return stripped, order_by_str, limit_str
 
     # ──────────────────────────────────────────────────────────────────────
-    #  Subquery detection
+    #  Subquery detection (fallback, may not be used now)
     # ──────────────────────────────────────────────────────────────────────
 
     def _detect_subquery(self, text, main_table, known_tables):
