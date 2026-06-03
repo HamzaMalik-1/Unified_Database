@@ -3,7 +3,7 @@ generators/select_generator.py
 
 Builds the final SQL / NOSQL SELECT command string from extracted parts.
 Handles: simple select, aggregates, GROUP BY, HAVING, JOINs, sub-queries,
-         scalar sub-queries, UNION / INTERSECT / EXCEPT, WITH (CTE).
+         scalar sub-queries, UNION / INTERSECT / EXCEPT, WITH (CTE), and implicit JOINs.
 """
 
 from __future__ import annotations
@@ -27,8 +27,13 @@ class SelectGenerator:
         p = self._p
 
         # ------------------------------------------------------------------
-        #  DIRECT HANDLERS for common aggregate patterns
+        #  DIRECT HANDLERS for implicit joins, aggregates, etc.
         # ------------------------------------------------------------------
+        # 0. "show users and orders" / "show users orders"
+        direct_result = self._handle_implicit_join(text)
+        if direct_result:
+            return direct_result
+
         # 1. "show count X by Y having count > Z"
         direct_result = self._handle_aggregate_count(text)
         if direct_result:
@@ -193,6 +198,71 @@ class SelectGenerator:
             cmd += f" LIMIT {limit_str}"
 
         return cmd
+
+    # ------------------------------------------------------------------
+    #  DIRECT HANDLER for implicit joins: "show users and orders" etc.
+    # ------------------------------------------------------------------
+    def _handle_implicit_join(self, text: str) -> Optional[str]:
+        """
+        Handles queries like:
+          - "show users and orders"
+          - "show users orders"
+          - "list users and orders"
+        Returns an INNER JOIN command.
+        """
+        # Remove "show" or "list" prefix
+        text_lower = text.lower().strip()
+        if text_lower.startswith("show "):
+            rest = text_lower[5:].strip()
+        elif text_lower.startswith("list "):
+            rest = text_lower[5:].strip()
+        else:
+            return None
+
+        # Split by "and" or just spaces
+        # First, try splitting by " and "
+        if " and " in rest:
+            parts = rest.split(" and ")
+        else:
+            # Otherwise, split by spaces and take first two words as tables
+            words = rest.split()
+            if len(words) >= 2:
+                parts = [words[0], words[1]]
+            else:
+                return None
+
+        if len(parts) != 2:
+            return None
+
+        table1 = parts[0]
+        table2 = parts[1]
+        known_tables = self._p.get_known_tables()
+        if table1 not in known_tables or table2 not in known_tables:
+            return None
+
+        # Determine foreign key relationship (naive)
+        # Assumption: table1.id = table2.table1_id or table2.id = table1.table2_id
+        fk_candidates = [
+            (f"{table1}.id", f"{table2}.{table1}_id"),
+            (f"{table2}.id", f"{table1}.{table2}_id"),
+        ]
+        join_cond = None
+        for left, right in fk_candidates:
+            if left.split('.')[1] in self._p.get_column_names(table1) and \
+               right.split('.')[1] in self._p.get_column_names(table2):
+                join_cond = f"{left} = {right}"
+                break
+        if join_cond is None:
+            # Fallback to the most common: users.id = orders.user_id
+            if table1 == "users" and table2 == "orders":
+                join_cond = "users.id = orders.user_id"
+            elif table1 == "orders" and table2 == "users":
+                join_cond = "orders.user_id = users.id"
+            else:
+                return None
+
+        prefix = self._p.get_prefix(table1)  # Both tables should be same type (SQL)
+        return f"{prefix} SELECT * FROM {table1} INNER JOIN {table2} ON {join_cond}"
 
     # ------------------------------------------------------------------
     #  DIRECT HANDLER for "show average age group by city"
