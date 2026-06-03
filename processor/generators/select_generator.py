@@ -79,20 +79,14 @@ class SelectGenerator:
         # ── CTE: WITH <name> AS (<inner>) <main> ─────────────────────────
         with_m = re.match(
             r'^with\s+(\w+)\s+as\s+\((.+?)\)\s+(select\s+.+)$',
-            text, re.DOTALL,
+            text, re.DOTALL | re.IGNORECASE,
         )
         if with_m:
-            cte_name   = with_m.group(1)
-            cte_query  = with_m.group(2).strip()
-            main_query = with_m.group(3).strip()
-            inner = self.generate(cte_query)
-            main  = self.generate(main_query)
-            if inner and main:
-                ic = re.sub(r'^(SQL|NOSQL)\s+', '', inner)
-                mc = re.sub(r'^(SQL|NOSQL)\s+', '', main)
-                prefix = "SQL" if inner.startswith("SQL") else "NOSQL"
-                return f"{prefix} WITH {cte_name} AS ({ic}) {mc}"
-            return None
+            cte_name = with_m.group(1)
+            inner_sql = with_m.group(2).strip()
+            main_sql = with_m.group(3).strip()
+            # CTEs are a SQL feature; force prefix to SQL
+            return f"SQL WITH {cte_name} AS ({inner_sql}) {main_sql}"
 
         # ── Strip trailing "order by" and "limit/offset" for join detection ──
         base_text, order_by_str, limit_str = self._strip_trailing_clauses(text)
@@ -229,7 +223,6 @@ class SelectGenerator:
             return None
 
         # Pattern: <table1> with id in (select <column> from <table2>)
-        # We'll use regex with parentheses capture
         match = re.match(r'^(\w+)\s+with\s+id\s+in\s*\(\s*select\s+(\w+)\s+from\s+(\w+)\s*\)$', rest)
         if not match:
             return None
@@ -280,7 +273,6 @@ class SelectGenerator:
             f"{child_table}.{main_table.rstrip('s')}_id",
             f"{child_table}.user_id",
         ]
-        # Remove duplicates
         seen = set()
         unique_candidates = []
         for c in candidates:
@@ -298,7 +290,7 @@ class SelectGenerator:
                 break
         if child_column is None:
             if main_table == "users" and "user_id" in [c.split('.')[1] for c in unique_candidates]:
-                child_column = unique_candidates[1]  # orders.user_id
+                child_column = unique_candidates[1]
             elif f"{child_table}.{main_table}_id" in unique_candidates:
                 child_column = f"{child_table}.{main_table}_id"
             else:

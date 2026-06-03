@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 import json
 from typing import Optional, TYPE_CHECKING, List, Tuple, Dict, Any
+from ..extractors.condition_extractor import ConditionExtractor
 
 try:
     from word2number import w2n as _w2n
@@ -244,21 +245,30 @@ class DMLGenerator:
         return pairs
 
     # ------------------------------------------------------------------
-    # UPDATE (unchanged)
+    # UPDATE (improved)
     # ------------------------------------------------------------------
 
     def update(self, text: str) -> str:
         p = self._p
+        # Extract table name (handle singular/plural)
         table = self._get_table_from_preposition(text, p.get_known_tables())
         if not table:
             table = p.get_table(text)
         if not table:
             return "Error: Could not determine table name for UPDATE"
         if table not in p.get_known_tables():
-            return f"Error: Table/Collection '{table}' does not exist"
+            # Try singular/plural mapping
+            known_tables = p.get_known_tables()
+            if table.endswith('s') and table[:-1] in known_tables:
+                table = table[:-1]
+            elif table + 's' in known_tables:
+                table = table + 's'
+            else:
+                return f"Error: Table/Collection '{table}' does not exist"
 
         prefix = p.get_prefix(table)
 
+        # NoSQL array operators
         nosql_op = self._detect_nosql_array_op(text)
         if nosql_op:
             op, val = nosql_op
@@ -268,18 +278,98 @@ class DMLGenerator:
             where_part = f" WHERE {where}" if where else ""
             return f"NOSQL UPDATE {table} SET {field} {op} {val}{where_part}"
 
-        set_pairs = []
-        for match in re.finditer(r'\b(\w+)\s+(?:to|=)\s+([^\s]+)', text):
-            col, val = match.group(1), match.group(2)
-            if col.lower() in {"name", "age", "id", "status", "email", "city", "price", "amount", "quantity", "description", "user_id"}:
-                val = _to_num(val.strip("'\""))
-                set_pairs.append(f"{col} = {_quote(val)}")
+        # Find "set" keyword
+        set_match = re.search(r'\bset\b', text, re.IGNORECASE)
+        if not set_match:
+            return f"{prefix} UPDATE {table}"
 
-        if set_pairs:
-            where = p.conditions.extract(text)
-            where_part = f" WHERE {where}" if where else ""
-            return f"{prefix} UPDATE {table} SET {', '.join(set_pairs)}{where_part}"
-        return f"{prefix} UPDATE {table}"
+        before_set = text[:set_match.start()].strip()
+        after_set = text[set_match.end():].strip()
+
+        # Extract condition from before_set (if any)
+        condition = None
+        cond_in_before = re.search(r'\b(?:with|whose|where)\s+(.+)$', before_set, re.IGNORECASE)
+        if cond_in_before:
+            cond_text = cond_in_before.group(1).strip()
+            m_id = re.match(r'id\s+(\d+)', cond_text, re.IGNORECASE)
+            if m_id:
+                condition = f"id = {m_id.group(1)}"
+            else:
+                parts = cond_text.split()
+                if len(parts) >= 2:
+                    col = parts[0]
+                    val = parts[1]
+                    condition = f"{col} = {val}"
+                else:
+                    from ..extractors.condition_extractor import ConditionExtractor
+                    cond_ext = ConditionExtractor()
+                    condition = cond_ext.extract(cond_text)
+
+        # If no condition in before_set, look in after_set
+        if condition is None:
+            assignments_text = after_set
+            cond_match = re.search(r'\b(where|with|whose)\b', after_set, re.IGNORECASE)
+            if cond_match:
+                cond_start = cond_match.start()
+                condition_text = after_set[cond_start:].strip()
+                assignments_text = after_set[:cond_start].strip()
+                for kw in ('where', 'with', 'whose'):
+                    if condition_text.lower().startswith(kw):
+                        condition_text = condition_text[len(kw):].strip()
+                        break
+                cond_parts = condition_text.split()
+                if len(cond_parts) == 2:
+                    col = cond_parts[0]
+                    val = cond_parts[1]
+                    condition = f"{col} = {val}"
+                elif len(cond_parts) == 3 and cond_parts[1] == '=':
+                    condition = condition_text
+                else:
+                    from ..extractors.condition_extractor import ConditionExtractor
+                    cond_ext = ConditionExtractor()
+                    condition = cond_ext.extract(condition_text)
+            else:
+                assignments_text = after_set
+
+            # Extract assignments
+            known_cols = p.get_column_names(table)
+            known_cols_lower = [c.lower() for c in known_cols]
+            assignments = self._extract_column_value_pairs(assignments_text, known_cols_lower)
+        else:
+            # Condition already found in before_set, extract assignments from after_set
+            assignments = self._extract_column_value_pairs(after_set, [])
+
+        # Validate assignments
+        if prefix == "NOSQL":
+            valid_assignments = assignments
+        else:
+            known_cols = p.get_column_names(table)
+            known_cols_lower = [c.lower() for c in known_cols]
+            valid_assignments = {}
+            for col, val in assignments.items():
+                if col.lower() in known_cols_lower:
+                    orig_col = next((c for c in known_cols if c.lower() == col.lower()), col)
+                    valid_assignments[orig_col] = val
+                else:
+                    return f"Error: Column '{col}' does not exist in table '{table}'"
+            if not valid_assignments:
+                return f"Error: No valid columns to update in table '{table}'"
+
+        # Build command
+        set_clause = ", ".join(f"{col} = {_quote(val)}" for col, val in valid_assignments.items())
+        command = f"{prefix} UPDATE {table} SET {set_clause}"
+        if condition:
+            command += f" WHERE {condition}"
+        return command
+
+    def _extract_update_condition(self, text: str) -> Optional[str]:
+        """Legacy method – kept for compatibility."""
+        cond_ext = ConditionExtractor()
+        return cond_ext.extract(text)
+
+    def _extract_update_assignments(self, text: str) -> Dict[str, str]:
+        """Legacy method – kept for compatibility."""
+        return self._extract_column_value_pairs(text, [])
 
     # ------------------------------------------------------------------
     # DELETE (unchanged)
