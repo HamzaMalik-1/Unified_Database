@@ -102,7 +102,12 @@ class NLPProcessor:
         if db_cmd:
             return db_cmd
 
-        token = self.intent.classify(text)
+        # ── Special case: "rename column" → ALTER_TABLE ──────────────────
+        # Because the intent classifier may not catch it.
+        if re.search(r'rename\s+column', text):
+            token = ALTER_TABLE
+        else:
+            token = self.intent.classify(text)
         if token is None:
             return None
 

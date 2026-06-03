@@ -7,7 +7,8 @@ into one of the engine's known intents.
 Priority order:
   1. Specific DDL phrases  (longest-match first)
   2. Compound DDL keywords ("create table", "drop collection", …)
-  3. General CRUD keywords
+  3. ALTER TABLE patterns ("add column", "drop column", "rename column", "rename table", …)
+  4. General CRUD keywords
 
 Returns a string intent token or None if unrecognised.
 """
@@ -64,6 +65,16 @@ _DDL_TOKEN_MAP: dict[str, str] = {
 # Sort by descending phrase length so "create text index" matches before "create index"
 _DDL_SORTED = sorted(_DDL_TOKEN_MAP.items(), key=lambda kv: len(kv[0]), reverse=True)
 
+# Patterns that indicate an ALTER TABLE operation (must be caught before DELETE/DROP)
+_ALTER_PATTERNS = [
+    r'\badd\s+column\b',
+    r'\bdrop\s+column\b',
+    r'\brename\s+column\b',
+    r'\brename\s+table\b',
+    r'\balter\s+column\s+\w+\s+(set|drop)\s+default\b',
+    r'\badd\s+check\b',
+]
+
 
 class IntentClassifier:
     """
@@ -84,6 +95,11 @@ class IntentClassifier:
         if "create collection" in text:
             return CREATE_COLLECTION
 
+        # ── 3. ALTER TABLE patterns (must be checked before DELETE/DROP) ──────
+        for pattern in _ALTER_PATTERNS:
+            if re.search(pattern, text):
+                return ALTER_TABLE
+
         # DROP TABLE vs DROP COLLECTION vs general DELETE ────────────────────
         if any(kw in text for kw in ("delete", "remove", "erase", "purge", "drop")):
             if "table" in text:
@@ -93,7 +109,7 @@ class IntentClassifier:
             # "drop" alone without table/collection → still a DELETE intent
             return DELETE
 
-        # ── 3. CRUD keywords ──────────────────────────────────────────────────
+        # ── 4. CRUD keywords ──────────────────────────────────────────────────
         for kw in SELECT_KEYWORDS:
             if re.search(rf'\b{re.escape(kw)}\b', text):
                 return SELECT

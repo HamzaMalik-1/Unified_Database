@@ -88,18 +88,17 @@
         "auto_increment": false
       },
       {
-        "name": "age",
+        "name": "years",
         "type": "INT",
         "constraints": [],
         "default": null,
         "auto_increment": false
       },
       {
-        "name": "city",
+        "name": "email",
         "type": "TEXT",
         "constraints": [],
-        "default": null,
-        "auto_increment": false
+        "default": null
       }
     ]
   },
@@ -112,46 +111,15 @@
         "name": "ali"
       }
     ],
-    "users": [
-      {
-        "id": 1,
-        "name": "bob",
-        "age": 31,
-        "city": "="
-      },
-      {
-        "id": 2,
-        "name": "alice",
-        "age": 31,
-        "city": "="
-      },
-      {
-        "id": 3,
-        "name": "ahmad",
-        "age": 14,
-        "city": "="
-      },
-      {
-        "id": 4,
-        "name": "ahmad",
-        "age": 31,
-        "city": "="
-      },
-      {
-        "id": 5,
-        "name": "bob",
-        "age": 31,
-        "city": "="
-      },
-      {
-        "id": 17,
-        "name": "bob",
-        "age": 31,
-        "city": "="
-      }
-    ]
+    "users": []
   },
-  "indexes": {},
+  "indexes": {
+    "idx_name": {
+      "table": "users",
+      "column": "name",
+      "map": {}
+    }
+  },
   "foreign_keys": {
     "product": [],
     "order": [],

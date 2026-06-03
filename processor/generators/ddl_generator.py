@@ -55,16 +55,13 @@ class DDLGenerator:
     # ── TABLE / COLLECTION ────────────────────────────────────────────────
 
     def create_table(self, text: str) -> Optional[str]:
-        # 1. Extract table name
         m = re.search(r'create\s+table\s+(\w+)', text)
         if not m:
             return None
         table_name = m.group(1)
 
-        # 2. Extract column list
         after_table = text[m.end():].strip()
         col_names = []
-        # Look for column list after "with" or in parentheses
         col_list_str = None
         m_with = re.search(r'with\s+(.+?)(?:\s+where|\s+having|\s+order|\s+limit|$)', after_table, re.IGNORECASE)
         if m_with:
@@ -74,17 +71,14 @@ class DDLGenerator:
             if m_paren:
                 col_list_str = m_paren.group(1)
             else:
-                # No delimiter – treat all remaining words as column names (stop at common keywords)
                 col_list_str = re.split(r'\s+(?:where|having|order|limit|into|values)', after_table)[0]
 
         if col_list_str:
-            # Split by commas or whitespace
             if ',' in col_list_str:
                 parts = [p.strip() for p in col_list_str.split(',')]
             else:
                 parts = col_list_str.split()
             for part in parts:
-                # Remove punctuation, keep only words
                 col = re.sub(r'[^\w]', '', part)
                 if col and col.lower() not in ('and', 'or', 'with', 'table', 'create'):
                     col_names.append(col)
@@ -92,35 +86,25 @@ class DDLGenerator:
             col_names = []
 
         if not col_names:
-            col_names = ['id', 'name']  # fallback
+            col_names = ['id', 'name']
 
-        # 3. Helper to infer type and constraints from column name
         def infer_column_def(col: str) -> str:
             col_lower = col.lower()
-            # Primary key detection
             if col_lower == 'id' or col_lower.endswith('_id'):
                 return f"{col} INT PRIMARY KEY"
-            # Numeric columns
             if col_lower in ('age', 'quantity', 'count', 'stock', 'year', 'month', 'day', 'rating', 'score'):
                 return f"{col} INT"
             if col_lower in ('price', 'amount', 'total', 'cost', 'revenue', 'balance', 'rate', 'tax'):
                 return f"{col} REAL"
-            # Boolean / flag columns
             if col_lower in ('is_active', 'is_deleted', 'has_shipped', 'flag', 'enabled', 'disabled'):
                 return f"{col} BOOLEAN"
-            # Date / time columns
             if col_lower in ('created_at', 'updated_at', 'timestamp', 'date', 'time', 'datetime'):
                 return f"{col} TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
-            # Text columns (default)
-            # Mark 'name', 'title', 'description' as NOT NULL
             if col_lower in ('name', 'title', 'description', 'email', 'username', 'address'):
                 return f"{col} TEXT NOT NULL"
             return f"{col} TEXT"
 
-        # 4. Build column definitions
         col_defs = [infer_column_def(col) for col in col_names]
-
-        # 5. Create final command
         col_def_str = ", ".join(col_defs)
         return f"SQL CREATE TABLE {table_name} ({col_def_str})"
 
@@ -145,44 +129,111 @@ class DDLGenerator:
     # ── ALTER TABLE ───────────────────────────────────────────────────────
 
     def alter_table(self, text: str) -> Optional[str]:
-        table = self._p.get_table(text)
+        text_lower = text.lower()
+        known_tables = self._p.get_known_tables()
 
-        # ADD COLUMN [with default]
-        m = re.search(
-            r'add\s+column\s+(\w+)\s+(\w+)(?:\s+default\s+(.+))?', text
-        )
-        if m and table:
-            col, typ = m.group(1), m.group(2).upper()
-            default = m.group(3)
-            if default:
-                default = "CURRENT_TIMESTAMP" if "current_timestamp" in default.lower() else default
-                return f"SQL ALTER TABLE {table} ADD {col} {typ} DEFAULT {default}"
+        # 1. RENAME TABLE (must be first, no table lookup needed)
+        m_rename_table = re.search(r'rename\s+table\s+(\w+)\s+to\s+(\w+)', text_lower)
+        if m_rename_table:
+            old_table = m_rename_table.group(1)
+            new_table = m_rename_table.group(2)
+            # Optional: verify old_table exists
+            if (old_table in known_tables or
+                (old_table.endswith('s') and old_table[:-1] in known_tables) or
+                (old_table + 's' in known_tables)):
+                return f"SQL ALTER TABLE {old_table} RENAME TO {new_table}"
+            return None
+
+        # For all other ALTER operations we need a table name
+        table = self._get_table_for_alter(text_lower, known_tables)
+        if not table:
+            return None
+
+        # 2. RENAME COLUMN
+        m_rename = re.search(r'rename\s+column\s+(\w+)\s+to\s+(\w+)', text_lower)
+        if m_rename:
+            old_col = m_rename.group(1)
+            new_col = m_rename.group(2)
+            return f"SQL ALTER TABLE {table} RENAME COLUMN {old_col} TO {new_col}"
+
+        # 3. ADD COLUMN
+        m_add = re.search(r'add\s+column\s+(\w+)\s+(\w+)', text_lower)
+        if m_add:
+            col = m_add.group(1)
+            typ = m_add.group(2).upper()
+            default_match = re.search(r'default\s+(.+)', text_lower)
+            if default_match:
+                default_val = default_match.group(1).strip()
+                if "current_timestamp" in default_val:
+                    default_val = "CURRENT_TIMESTAMP"
+                return f"SQL ALTER TABLE {table} ADD {col} {typ} DEFAULT {default_val}"
             return f"SQL ALTER TABLE {table} ADD {col} {typ}"
 
-        # RENAME COLUMN
-        m = re.search(r'rename\s+column\s+(\w+)\s+to\s+(\w+)', text)
-        if m and table:
-            return f"SQL ALTER TABLE {table} RENAME COLUMN {m.group(1)} TO {m.group(2)}"
+        # 4. DROP COLUMN
+        m_drop = re.search(r'drop\s+column\s+(\w+)', text_lower)
+        if m_drop:
+            col = m_drop.group(1)
+            return f"SQL ALTER TABLE {table} DROP COLUMN {col}"
 
-        # DROP COLUMN
-        m = re.search(r'drop\s+column\s+(\w+)', text)
-        if m and table:
-            return f"SQL ALTER TABLE {table} DROP COLUMN {m.group(1)}"
+        # 5. ALTER COLUMN SET DEFAULT
+        m_set_default = re.search(r'alter\s+column\s+(\w+)\s+set\s+default\s+(.+)', text_lower)
+        if m_set_default:
+            return f"SQL ALTER TABLE {table} ALTER COLUMN {m_set_default.group(1)} SET DEFAULT {m_set_default.group(2)}"
 
-        # RENAME TABLE
-        m = re.search(r'rename\s+table\s+(\w+)\s+to\s+(\w+)', text)
-        if m:
-            return f"SQL ALTER TABLE {m.group(1)} RENAME TO {m.group(2)}"
+        # 6. ALTER COLUMN DROP DEFAULT
+        m_drop_default = re.search(r'alter\s+column\s+(\w+)\s+drop\s+default', text_lower)
+        if m_drop_default:
+            return f"SQL ALTER TABLE {table} ALTER COLUMN {m_drop_default.group(1)} DROP DEFAULT"
 
-        # ALTER COLUMN DEFAULT
-        m = re.search(r'alter\s+column\s+(\w+)\s+set\s+default\s+(.+)', text)
-        if m and table:
-            return f"SQL ALTER TABLE {table} ALTER COLUMN {m.group(1)} SET DEFAULT {m.group(2)}"
+        # 7. ADD CHECK (optional)
+        m_add_check = re.search(r'add\s+check\s+\((.+?)\)', text_lower)
+        if m_add_check:
+            expr = m_add_check.group(1)
+            return f"SQL ALTER TABLE {table} ADD CHECK ({expr})"
 
-        m = re.search(r'alter\s+column\s+(\w+)\s+drop\s+default', text)
-        if m and table:
-            return f"SQL ALTER TABLE {table} ALTER COLUMN {m.group(1)} DROP DEFAULT"
+        return None
 
+    def _get_table_for_alter(self, text_lower: str, known_tables: list) -> Optional[str]:
+        """
+        Extract table name for ALTER operations (excluding RENAME TABLE).
+        Uses the processor's TableExtractor plus "in"/"from" patterns.
+        """
+        # Try "in <td>"
+        in_match = re.search(r'\bin\s+(\w+)\b', text_lower)
+        if in_match:
+            cand = in_match.group(1)
+            if cand in known_tables:
+                return cand
+            if cand.endswith('s') and cand[:-1] in known_tables:
+                return cand[:-1]
+            if cand + 's' in known_tables:
+                return cand + 's'
+
+        # Try "from <td>"
+        from_match = re.search(r'\bfrom\s+(\w+)\b', text_lower)
+        if from_match:
+            cand = from_match.group(1)
+            if cand in known_tables:
+                return cand
+            if cand.endswith('s') and cand[:-1] in known_tables:
+                return cand[:-1]
+            if cand + 's' in known_tables:
+                return cand + 's'
+
+        # Use the main TableExtractor (via processor.get_table)
+        table = self._p.get_table(text_lower)
+        if table and table in known_tables:
+            return table
+
+        # Last resort: any word that matches a known table
+        words = re.findall(r'\b[a-z_][a-z0-9_]*\b', text_lower)
+        for w in words:
+            if w in known_tables:
+                return w
+            if w.endswith('s') and w[:-1] in known_tables:
+                return w[:-1]
+            if w + 's' in known_tables:
+                return w + 's'
         return None
 
     # ── VIEW ──────────────────────────────────────────────────────────────
@@ -206,9 +257,9 @@ class DDLGenerator:
             r'create\s+procedure\s+(\w+)\s*(?:\(([^)]*)\))?\s+as\s+(.+)', text
         )
         if m:
-            proc   = m.group(1)
+            proc = m.group(1)
             params = m.group(2) or ""
-            body   = m.group(3)
+            body = m.group(3)
             return f"SQL CREATE PROCEDURE {proc} ({params}) AS {body}"
         return None
 
@@ -231,10 +282,7 @@ class DDLGenerator:
                 m.group(1), m.group(2).upper(), m.group(3).upper(),
                 m.group(4), m.group(5).strip(),
             )
-            return (
-                f"SQL CREATE TRIGGER {name} {timing} {event} "
-                f"ON {table} FOR EACH ROW BEGIN {stmt} END"
-            )
+            return f"SQL CREATE TRIGGER {name} {timing} {event} ON {table} FOR EACH ROW BEGIN {stmt} END"
         return None
 
     def drop_trigger(self, text: str) -> Optional[str]:
