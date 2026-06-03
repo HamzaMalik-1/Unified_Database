@@ -37,6 +37,15 @@
         "id": 1,
         "name": "alice",
         "address": "{'city': 'boston'}"
+      },
+      {
+        "id": 3,
+        "hobbies": [
+          "swimming",
+          "dancing",
+          "dancing",
+          "reading"
+        ]
       }
     ],
     "sales": [

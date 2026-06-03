@@ -4,7 +4,7 @@ generators/select_generator.py
 Builds the final SQL / NOSQL SELECT command string from extracted parts.
 Handles: simple select, aggregates, GROUP BY, HAVING, JOINs, sub-queries,
          scalar sub-queries, UNION / INTERSECT / EXCEPT, WITH (CTE), implicit JOINs,
-         "who have" subqueries, and explicit IN subqueries.
+         "who have" subqueries, explicit IN subqueries, and CONTAINS.
 """
 
 from __future__ import annotations
@@ -30,6 +30,11 @@ class SelectGenerator:
         # ------------------------------------------------------------------
         #  DIRECT HANDLERS for various patterns
         # ------------------------------------------------------------------
+        # NEW: Handle CONTAINS queries (must be first)
+        direct_result = self._handle_contains(text)
+        if direct_result:
+            return direct_result
+
         # 0. "show users with id in (select user_id from orders)"
         direct_result = self._handle_in_subquery(text)
         if direct_result:
@@ -45,7 +50,7 @@ class SelectGenerator:
         if direct_result:
             return direct_result
 
-        # 3. "show count X by Y having count > Z"
+        # 3. "show count of sales by product having count > Z"
         direct_result = self._handle_aggregate_count(text)
         if direct_result:
             return direct_result
@@ -144,6 +149,16 @@ class SelectGenerator:
         aggregates  = p.select_parts.extract_aggregates(base_text)
         group_by    = p.select_parts.extract_group_by(base_text)
 
+        # ── FALLBACK: if group_by is still None but we have aggregates and text contains "by X" ──
+        if not group_by and aggregates:
+            # Look for pattern "by <word>" where <word> is likely a column name
+            by_match = re.search(r'\bby\s+([a-z_][a-z0-9_]*)\b', base_text.lower())
+            if by_match:
+                candidate = by_match.group(1)
+                # verify candidate is a known column (or just accept it)
+                if candidate in known_cols or candidate in ['region', 'city', 'product', 'category']:
+                    group_by = candidate
+
         # Build SELECT clause
         if aggregates:
             agg_parts = []
@@ -203,6 +218,61 @@ class SelectGenerator:
             cmd += f" LIMIT {limit_str}"
 
         return cmd
+
+    # ------------------------------------------------------------------
+    #  DIRECT HANDLER for CONTAINS (NoSQL array/string containment)
+    # ------------------------------------------------------------------
+    def _handle_contains(self, text: str) -> Optional[str]:
+        """
+        Handles queries like:
+          - "show nosql_users where hobbies contains 'reading'"
+          - "show nosql_users where name contains 'ali'"
+          - "show nosql_users whose hobbies contains 'reading'"
+        Returns a NOSQL SELECT command with CONTAINS condition.
+        """
+        text_lower = text.lower().strip()
+        # Remove leading "show " or "list " or "get "
+        if text_lower.startswith("show "):
+            rest = text_lower[5:].strip()
+        elif text_lower.startswith("list "):
+            rest = text_lower[5:].strip()
+        elif text_lower.startswith("get "):
+            rest = text_lower[4:].strip()
+        else:
+            return None
+
+        # Patterns: <table> where <field> contains <value>
+        # or <table> whose <field> contains <value>
+        match = re.match(r'^(\w+)\s+(?:where|whose)\s+(\w+)\s+contains\s+[\'"]?([^\'"]+)[\'"]?$', rest)
+        if not match:
+            # Also allow "contains" without quotes around value
+            match = re.match(r'^(\w+)\s+(?:where|whose)\s+(\w+)\s+contains\s+(\w+)$', rest)
+        if not match:
+            return None
+
+        table_candidate = match.group(1)
+        field = match.group(2)
+        value = match.group(3).strip("'\"")
+
+        # Resolve table name
+        known_tables = self._p.get_known_tables()
+        table = None
+        if table_candidate in known_tables:
+            table = table_candidate
+        else:
+            singular = table_candidate.rstrip('s')
+            if singular in known_tables:
+                table = singular
+            elif table_candidate + 's' in known_tables:
+                table = table_candidate + 's'
+
+        if table is None:
+            return None
+
+        prefix = self._p.get_prefix(table)
+        # Properly quote the value (assuming string)
+        quoted_value = f"'{value}'"
+        return f"{prefix} SELECT * FROM {table} WHERE {field} CONTAINS {quoted_value}"
 
     # ------------------------------------------------------------------
     #  DIRECT HANDLER for "show users with id in (select user_id from order)"
@@ -428,55 +498,48 @@ class SelectGenerator:
         return f"{prefix} SELECT {agg_func}({column}) AS {alias}, {group_col} FROM {candidate_table} GROUP BY {group_col}"
 
     # ------------------------------------------------------------------
-    #  DIRECT HANDLER for "show count X by Y having count > Z"
+    #  DIRECT HANDLER for "show count X by Y" / "show count of X by Y"
     # ------------------------------------------------------------------
     def _handle_aggregate_count(self, text: str) -> Optional[str]:
         """
         Parses queries like:
-          - "show count orders by user_id having count > 1"
-          - "count orders by user_id having count > 1"
-        Handles singular/plural (e.g., 'orders' -> 'order').
+          - "show count orders by product"
+          - "show count of orders by product"
+          - "count orders by product"
+          - "show count of sales by product"
+        Returns a COUNT + GROUP BY command.
         """
-        words = text.lower().split()
-        if not words:
+        text_lower = text.lower().strip()
+        # Normalize: remove leading "show " if present
+        if text_lower.startswith("show "):
+            rest = text_lower[5:].strip()
+        else:
+            rest = text_lower
+
+        # Pattern: count [of] <td> by <column>
+        # Match optional "of"
+        match = re.match(r'^count\s+(?:of\s+)?(\w+)\s+by\s+(\w+)(?:\s+having\s+count\s*>\s*(\d+))?$', rest)
+        if not match:
             return None
 
-        idx = 0
-        if words[0] == "show":
-            idx = 1
-        if idx >= len(words) or words[idx] != "count":
-            return None
-        idx += 1
-        if idx >= len(words):
-            return None
+        table_candidate = match.group(1)
+        group_col = match.group(2)
+        threshold = match.group(3) if match.group(3) else None
 
-        candidate = words[idx]
+        # Resolve table name (handle singular/plural)
         known_tables = self._p.get_known_tables()
         table = None
-        if candidate in known_tables:
-            table = candidate
+        if table_candidate in known_tables:
+            table = table_candidate
         else:
-            singular = candidate.rstrip('s')
+            singular = table_candidate.rstrip('s')
             if singular in known_tables:
                 table = singular
+            elif table_candidate + 's' in known_tables:
+                table = table_candidate + 's'
+
         if table is None:
             return None
-
-        idx += 1
-        if idx >= len(words) or words[idx] != "by":
-            return None
-        idx += 1
-        if idx >= len(words):
-            return None
-        group_col = words[idx]
-        idx += 1
-
-        threshold = None
-        if idx + 3 < len(words) and words[idx] == "having" and words[idx+1] == "count" and words[idx+2] == ">":
-            try:
-                threshold = int(words[idx+3])
-            except ValueError:
-                pass
 
         prefix = self._p.get_prefix(table)
         if threshold is not None:
