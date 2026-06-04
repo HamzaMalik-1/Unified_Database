@@ -1,7 +1,13 @@
 {
   "schemas": {},
   "tables": {},
-  "collections": {},
+  "collections": {
+    "active_users": [
+      {
+        "user_id": 1
+      }
+    ]
+  },
   "nosql_indexes": {},
   "text_indexes": {}
 }

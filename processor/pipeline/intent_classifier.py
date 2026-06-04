@@ -110,6 +110,10 @@ class IntentClassifier:
             return DELETE
 
         # ── 4. CRUD keywords ──────────────────────────────────────────────────
+        for kw in UPDATE_KEYWORDS:
+            if re.search(rf'\b{re.escape(kw)}\b', text):
+                return UPDATE
+                
         for kw in SELECT_KEYWORDS:
             if re.search(rf'\b{re.escape(kw)}\b', text):
                 return SELECT
@@ -118,8 +122,5 @@ class IntentClassifier:
             if re.search(rf'\b{re.escape(kw)}\b', text):
                 return INSERT
 
-        for kw in UPDATE_KEYWORDS:
-            if re.search(rf'\b{re.escape(kw)}\b', text):
-                return UPDATE
 
         return None

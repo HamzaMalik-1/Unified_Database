@@ -39,11 +39,40 @@ class DMLGenerator:
         self._p = processor
 
     # ------------------------------------------------------------------
-    # INSERT
+    # INSERT (now handles cross-model INSERT ... SELECT FROM NOSQL)
     # ------------------------------------------------------------------
 
     def insert(self, text: str) -> str:
         p = self._p
+
+        # ── Check for cross-model INSERT ... SELECT FROM NOSQL ──────────────
+        # Improved pattern: allows extra whitespace, case‑insensitive "nosql",
+        # and captures the inner subquery (may contain parentheses)
+        cross_match = re.search(
+            r'insert\s+into\s+(\w+)\s*\(([^)]+)\)\s+select\s+(.+?)\s+from\s+nosql\s*\((.+)\)',
+            text, re.IGNORECASE | re.DOTALL
+        )
+        if cross_match:
+            target_table = cross_match.group(1).strip()
+            target_cols_raw = cross_match.group(2).strip()
+            select_cols_raw = cross_match.group(3).strip()
+            nosql_subquery = cross_match.group(4).strip()
+
+            # Split columns
+            target_cols = [c.strip() for c in target_cols_raw.split(',')]
+            select_cols = [c.strip() for c in select_cols_raw.split(',')]
+
+            if len(target_cols) != len(select_cols):
+                return f"Error: Number of target columns ({len(target_cols)}) does not match number of selected columns ({len(select_cols)})"
+
+            # Build the command: SQL INSERT INTO ... SELECT ... FROM NOSQL (...)
+            command = (
+                f"SQL INSERT INTO {target_table} ({', '.join(target_cols)}) "
+                f"SELECT {', '.join(select_cols)} FROM NOSQL ({nosql_subquery})"
+            )
+            return command
+
+        # ── Normal INSERT (existing logic) ─────────────────────────────────
         # First try to extract table from "to X" or "into X"
         table = self._get_table_from_preposition(text, p.get_known_tables())
         if not table:
@@ -286,24 +315,32 @@ class DMLGenerator:
         before_set = text[:set_match.start()].strip()
         after_set = text[set_match.end():].strip()
 
+        # Helper to check if a condition contains a cross-model subquery
+        def contains_nosql_subquery(cond: str) -> bool:
+            return bool(re.search(r'\bnosql\s+select\b', cond, re.IGNORECASE))
+
         # Extract condition from before_set (if any)
         condition = None
         cond_in_before = re.search(r'\b(?:with|whose|where)\s+(.+)$', before_set, re.IGNORECASE)
         if cond_in_before:
             cond_text = cond_in_before.group(1).strip()
-            m_id = re.match(r'id\s+(\d+)', cond_text, re.IGNORECASE)
-            if m_id:
-                condition = f"id = {m_id.group(1)}"
+            # If it contains NOSQL SELECT, keep it raw
+            if contains_nosql_subquery(cond_text):
+                condition = cond_text
             else:
-                parts = cond_text.split()
-                if len(parts) >= 2:
-                    col = parts[0]
-                    val = parts[1]
-                    condition = f"{col} = {val}"
+                m_id = re.match(r'id\s+(\d+)', cond_text, re.IGNORECASE)
+                if m_id:
+                    condition = f"id = {m_id.group(1)}"
                 else:
-                    from ..extractors.condition_extractor import ConditionExtractor
-                    cond_ext = ConditionExtractor()
-                    condition = cond_ext.extract(cond_text)
+                    parts = cond_text.split()
+                    if len(parts) >= 2:
+                        col = parts[0]
+                        val = parts[1]
+                        condition = f"{col} = {val}"
+                    else:
+                        from ..extractors.condition_extractor import ConditionExtractor
+                        cond_ext = ConditionExtractor()
+                        condition = cond_ext.extract(cond_text)
 
         # If no condition in before_set, look in after_set
         if condition is None:
@@ -317,17 +354,21 @@ class DMLGenerator:
                     if condition_text.lower().startswith(kw):
                         condition_text = condition_text[len(kw):].strip()
                         break
-                cond_parts = condition_text.split()
-                if len(cond_parts) == 2:
-                    col = cond_parts[0]
-                    val = cond_parts[1]
-                    condition = f"{col} = {val}"
-                elif len(cond_parts) == 3 and cond_parts[1] == '=':
+                # If condition contains NOSQL SELECT, keep it raw
+                if contains_nosql_subquery(condition_text):
                     condition = condition_text
                 else:
-                    from ..extractors.condition_extractor import ConditionExtractor
-                    cond_ext = ConditionExtractor()
-                    condition = cond_ext.extract(condition_text)
+                    cond_parts = condition_text.split()
+                    if len(cond_parts) == 2:
+                        col = cond_parts[0]
+                        val = cond_parts[1]
+                        condition = f"{col} = {val}"
+                    elif len(cond_parts) == 3 and cond_parts[1] == '=':
+                        condition = condition_text
+                    else:
+                        from ..extractors.condition_extractor import ConditionExtractor
+                        cond_ext = ConditionExtractor()
+                        condition = cond_ext.extract(condition_text)
             else:
                 assignments_text = after_set
 
