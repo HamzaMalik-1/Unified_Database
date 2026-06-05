@@ -34,7 +34,11 @@ from __future__ import annotations
 
 import re
 from typing import Optional, List
-
+import subprocess
+import random
+import json
+from pathlib import Path
+import sys
 from .constants import COLUMN_SYNONYMS, OLLAMA_MODEL, OLLAMA_URL, OLLAMA_TIMEOUT
 from .pipeline.intent_classifier import (
     IntentClassifier,
@@ -167,34 +171,135 @@ class NLPProcessor:
     #  LLM fallback  (Ollama)
     # ══════════════════════════════════════════════════════════════════════
 
-    def _llm_fallback(self, text: str) -> Optional[str]:
-        prompt = (
-            "You are a database assistant. Convert the following user request "
-            "into a SQL or NoSQL command.\n"
-            "The command MUST start with either \"SQL\" or \"NOSQL\".\n"
-            "Output ONLY the command – no explanation, no markdown.\n\n"
-            f"User request: {text}\n\nCommand:"
-        )
+    def _get_current_schema_as_string(self) -> str:
+        """Return a human‑readable schema description of the current database."""
         try:
-            import requests
-            resp = requests.post(
-                OLLAMA_URL,
-                json={
-                    "model":       OLLAMA_MODEL,
-                    "prompt":      prompt,
-                    "stream":      False,
-                    "temperature": 0,
-                    "max_tokens":  200,
-                },
-                timeout=OLLAMA_TIMEOUT,
+            sql_engine = self.catalog.get_current_sql_engine()
+            nosql_engine = self.catalog.get_current_nosql_engine()
+        except Exception:
+            return "SQL tables: none. NoSQL collections: none."
+
+        sql_tables = []
+        for table_name, rows in sql_engine.storage.data.get("tables", {}).items():
+            schema = sql_engine.storage.get_schema(table_name)
+            if schema:
+                cols = [col["name"] for col in schema]
+                sql_tables.append(f"{table_name} ({', '.join(cols)})")
+
+        nosql_collections = []
+        for coll_name, docs in nosql_engine.storage.data.get("collections", {}).items():
+            # Infer fields from first document (simple)
+            fields = set()
+            for doc in docs[:1]:
+                fields.update(doc.keys())
+            if fields:
+                nosql_collections.append(f"{coll_name} ({', '.join(fields)})")
+            else:
+                nosql_collections.append(coll_name)
+
+        result = ""
+        if sql_tables:
+            result += f"SQL tables: {', '.join(sql_tables)}. "
+        else:
+            result += "SQL tables: none. "
+        if nosql_collections:
+            result += f"NoSQL collections: {', '.join(nosql_collections)}."
+        else:
+            result += "NoSQL collections: none."
+        return result
+
+    def _llm_fallback(self, text: str) -> Optional[str]:
+        """
+        Few‑shot fallback using Ollama command‑line.
+        Loads random examples from train.jsonl, injects current schema,
+        and extracts only the SQL/NOSQL command.
+        """
+        print("Call LLM")
+        # ------------------------------------------------------------------
+        # 1. Load and cache few‑shot examples (from train.jsonl)
+        # ------------------------------------------------------------------
+        if not hasattr(self, '_few_shot_examples'):
+            # dataset_path = Path("train.jsonl")
+            dataset_path = Path(__file__).parent / "dataset" / "train.jsonl"
+            if not dataset_path.exists():
+                print(f"[NLP] Dataset not found: {dataset_path}", file=sys.stderr)
+                return None
+            with open(dataset_path, 'r', encoding='utf-8') as f:
+                self._few_shot_examples = [json.loads(line) for line in f if line.strip()]
+            if not self._few_shot_examples:
+                print("[NLP] No valid examples in dataset", file=sys.stderr)
+                return None
+
+        # ------------------------------------------------------------------
+        # 2. Randomly pick 1‑2 examples (adjust as needed)
+        # ------------------------------------------------------------------
+        num_shots = min(2, len(self._few_shot_examples))
+        few_shot = random.sample(self._few_shot_examples, num_shots)
+
+        # ------------------------------------------------------------------
+        # 3. Build schema description of the current database
+        # ------------------------------------------------------------------
+        schema_str = self._get_current_schema_as_string()  # assume this method exists
+        if not schema_str:
+            schema_str = "SQL tables: none. NoSQL collections: none."
+
+        # ------------------------------------------------------------------
+        # 4. Build prompt with few‑shot examples and the real question
+        # ------------------------------------------------------------------
+        prompt_parts = []
+        prompt_parts.append("You are a database assistant. Output ONLY the command – no explanation, no markdown.\n")
+        for ex in few_shot:
+            prompt_parts.append(
+                f"### Schema: {ex['schema']}\n"
+                f"### Question: {ex['question']}\n"
+                f"### Command: {ex['output']}\n"
             )
-            if resp.status_code == 200:
-                result = resp.json().get("response", "").strip()
-                if result.upper().startswith(("SQL", "NOSQL")):
-                    return result
-        except Exception as exc:
-            print(f"[NLP] LLM fallback error: {exc}")
-        return None
+        prompt_parts.append(
+            f"### Schema: {schema_str}\n"
+            f"### Question: {text}\n"
+            f"### Command:"
+        )
+        full_prompt = "\n".join(prompt_parts)
+
+        # ------------------------------------------------------------------
+        # 5. Call ollama run (subprocess) – more reliable than HTTP API
+        # ------------------------------------------------------------------
+        try:
+            result = subprocess.run(
+                ["ollama", "run", OLLAMA_MODEL],   # OLLAMA_MODEL from constants
+                input=full_prompt,
+                capture_output=True,
+                text=True,
+                timeout=OLLAMA_TIMEOUT,           # use your existing timeout (e.g., 120)
+                encoding='utf-8'
+            )
+        except subprocess.TimeoutExpired:
+            print("[NLP] Ollama subprocess timed out", file=sys.stderr)
+            return None
+        except Exception as e:
+            print(f"[NLP] Ollama subprocess error: {e}", file=sys.stderr)
+            return None
+
+        if result.returncode != 0:
+            print(f"[NLP] Ollama error (code {result.returncode}): {result.stderr}", file=sys.stderr)
+            return None
+
+        # ------------------------------------------------------------------
+        # 6. Extract the first line that looks like a SQL/NOSQL command
+        # ------------------------------------------------------------------
+        raw_output = result.stdout.strip()
+        for line in raw_output.split('\n'):
+            line_clean = line.strip()
+            if not line_clean:
+                continue
+        upper = line_clean.upper()
+        if (upper.startswith(("SQL", "NOSQL", "SELECT", "INSERT", "UPDATE", "DELETE",
+                              "CREATE", "ALTER", "DROP", "WITH", "CALL"))):
+            # Remove trailing semicolon if present (optional)
+            return line_clean.rstrip(';')
+        # Fallback: return first non‑empty line
+        first_line = raw_output.split('\n')[0].strip() if raw_output else None
+        return first_line
 
     # ══════════════════════════════════════════════════════════════════════
     #  Catalog helpers  (shared by generators & extractors)

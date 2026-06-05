@@ -1,6 +1,130 @@
 {
-  "schemas": {},
-  "tables": {},
+  "schemas": {
+    "product": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "constraints": [
+          "NOT NULL"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "amount",
+        "type": "REAL",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "categories",
+        "type": "TEXT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "price",
+        "type": "REAL",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      }
+    ],
+    "order": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "price",
+        "type": "REAL",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "constraints": [
+          "NOT NULL"
+        ],
+        "default": null,
+        "auto_increment": false
+      }
+    ],
+    "users": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "constraints": [
+          "NOT NULL"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "years",
+        "type": "INT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "email",
+        "type": "TEXT",
+        "constraints": [],
+        "default": null
+      },
+      {
+        "name": "in",
+        "type": "USERS",
+        "constraints": [],
+        "default": null
+      },
+      {
+        "name": "status",
+        "type": "TEXT",
+        "constraints": [],
+        "default": null
+      }
+    ]
+  },
+  "tables": {
+    "product": [],
+    "order": [
+      {
+        "id": 101,
+        "price": 150.5,
+        "name": "ali"
+      }
+    ],
+    "users": []
+  },
   "indexes": {
     "idx_name": {
       "table": "users",
@@ -8,7 +132,11 @@
       "map": {}
     }
   },
-  "foreign_keys": {},
+  "foreign_keys": {
+    "product": [],
+    "order": [],
+    "users": []
+  },
   "check_constraints": {
     "orders": [],
     "product": [],
