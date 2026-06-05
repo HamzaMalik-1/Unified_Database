@@ -2,7 +2,11 @@
 import re
 from typing import Optional, List, Dict, Any, Tuple
 from word2number import w2n
-
+import json
+import random
+import subprocess
+import sys
+from pathlib import Path
 # Optional spaCy import (lazy loaded)
 _spacy_nlp = None
 

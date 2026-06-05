@@ -212,15 +212,15 @@ class NLPProcessor:
         """
         Few‑shot fallback using Ollama command‑line.
         Loads random examples from train.jsonl, injects current schema,
-        and extracts only the SQL/NOSQL command.
+        and extracts the command, adding the correct prefix (SQL/NOSQL)
+        based on the table/collection name or command keywords.
         """
         print("Call LLM")
         # ------------------------------------------------------------------
-        # 1. Load and cache few‑shot examples (from train.jsonl)
+        # 1. Load and cache few‑shot examples
         # ------------------------------------------------------------------
         if not hasattr(self, '_few_shot_examples'):
-            # dataset_path = Path("train.jsonl")
-            dataset_path = Path(__file__).parent / "dataset" / "train.jsonl"
+            dataset_path = Path(__file__).parent.parent / "dataset" / "train.jsonl"
             if not dataset_path.exists():
                 print(f"[NLP] Dataset not found: {dataset_path}", file=sys.stderr)
                 return None
@@ -231,23 +231,23 @@ class NLPProcessor:
                 return None
 
         # ------------------------------------------------------------------
-        # 2. Randomly pick 1‑2 examples (adjust as needed)
+        # 2. Pick 1‑2 random examples
         # ------------------------------------------------------------------
         num_shots = min(2, len(self._few_shot_examples))
         few_shot = random.sample(self._few_shot_examples, num_shots)
 
         # ------------------------------------------------------------------
-        # 3. Build schema description of the current database
+        # 3. Build schema description
         # ------------------------------------------------------------------
-        schema_str = self._get_current_schema_as_string()  # assume this method exists
+        schema_str = self._get_current_schema_as_string()
         if not schema_str:
             schema_str = "SQL tables: none. NoSQL collections: none."
 
         # ------------------------------------------------------------------
-        # 4. Build prompt with few‑shot examples and the real question
+        # 4. Build prompt (strong instruction to output prefix)
         # ------------------------------------------------------------------
         prompt_parts = []
-        prompt_parts.append("You are a database assistant. Output ONLY the command – no explanation, no markdown.\n")
+        prompt_parts.append("You are a database assistant. Output ONLY the command – no explanation, no markdown. The command MUST start with 'SQL ' or 'NOSQL '.\n")
         for ex in few_shot:
             prompt_parts.append(
                 f"### Schema: {ex['schema']}\n"
@@ -262,15 +262,15 @@ class NLPProcessor:
         full_prompt = "\n".join(prompt_parts)
 
         # ------------------------------------------------------------------
-        # 5. Call ollama run (subprocess) – more reliable than HTTP API
+        # 5. Call ollama run
         # ------------------------------------------------------------------
         try:
             result = subprocess.run(
-                ["ollama", "run", OLLAMA_MODEL],   # OLLAMA_MODEL from constants
+                ["ollama", "run", OLLAMA_MODEL],
                 input=full_prompt,
                 capture_output=True,
                 text=True,
-                timeout=OLLAMA_TIMEOUT,           # use your existing timeout (e.g., 120)
+                timeout=OLLAMA_TIMEOUT,
                 encoding='utf-8'
             )
         except subprocess.TimeoutExpired:
@@ -285,21 +285,69 @@ class NLPProcessor:
             return None
 
         # ------------------------------------------------------------------
-        # 6. Extract the first line that looks like a SQL/NOSQL command
+        # 6. Extract the raw command and add correct prefix
         # ------------------------------------------------------------------
         raw_output = result.stdout.strip()
+        raw_command = None
+
         for line in raw_output.split('\n'):
             line_clean = line.strip()
             if not line_clean:
                 continue
-        upper = line_clean.upper()
-        if (upper.startswith(("SQL", "NOSQL", "SELECT", "INSERT", "UPDATE", "DELETE",
-                              "CREATE", "ALTER", "DROP", "WITH", "CALL"))):
-            # Remove trailing semicolon if present (optional)
-            return line_clean.rstrip(';')
-        # Fallback: return first non‑empty line
-        first_line = raw_output.split('\n')[0].strip() if raw_output else None
-        return first_line
+            upper = line_clean.upper()
+            # If already has valid prefix, return as is
+            if upper.startswith(("SQL ", "NOSQL ")):
+                return line_clean.rstrip(';')
+            # Otherwise capture the first line that looks like a command
+            if upper.startswith(("SELECT", "INSERT", "UPDATE", "DELETE",
+                                 "CREATE", "ALTER", "DROP", "WITH", "CALL",
+                                 "NOSQL", "CONTAINS", "PUSH", "PULL", "ADDTOSET")):
+                raw_command = line_clean
+                break
+
+        if not raw_command:
+            # Fallback: use first non‑empty line
+            first_line = raw_output.split('\n')[0].strip() if raw_output else None
+            if not first_line:
+                return None
+            raw_command = first_line
+
+        # ------------------------------------------------------------------
+        # 7. Determine correct prefix (SQL or NOSQL)
+        # ------------------------------------------------------------------
+        # First, try to extract the first table/collection name from the command
+        import re
+        patterns = [
+            r'\bFROM\s+([a-z_][a-z0-9_]*)',
+            r'\bINTO\s+([a-z_][a-z0-9_]*)',
+            r'\bUPDATE\s+([a-z_][a-z0-9_]*)',
+            r'\bDELETE\s+FROM\s+([a-z_][a-z0-9_]*)',
+            r'\bJOIN\s+([a-z_][a-z0-9_]*)',
+            r'\bTABLE\s+([a-z_][a-z0-9_]*)',
+            r'\bCOLLECTION\s+([a-z_][a-z0-9_]*)'
+        ]
+        table = None
+        for pat in patterns:
+            m = re.search(pat, raw_command, re.IGNORECASE)
+            if m:
+                table = m.group(1)
+                break
+
+        if table:
+            sql_tables = self.get_sql_tables()
+            if table in sql_tables:
+                prefix = "SQL"
+            else:
+                prefix = "NOSQL"
+        else:
+            # Fallback: check for NoSQL‑specific keywords
+            if re.search(r'\b(CONTAINS|PUSH|PULL|ADDTOSET)\b', raw_command, re.IGNORECASE):
+                prefix = "NOSQL"
+            else:
+                prefix = "SQL"
+
+        final_command = f"{prefix} {raw_command.rstrip(';')}"
+        return final_command    
 
     # ══════════════════════════════════════════════════════════════════════
     #  Catalog helpers  (shared by generators & extractors)
