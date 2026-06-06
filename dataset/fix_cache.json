@@ -1,0 +1,5 @@
+{
+  "d4f1bbdb2dfba32d8edce5996c1e6db3": "SQL SELECT * FROM orders WHERE id = 1234567890; -- Assuming there's a specific ID to query. If not specified, you may need additional context or clarification on which record is intended for selection.",
+  "e97c8d8d7c200e0078329c880c578ec2": "SQL SELECT * FROM users",
+  "918f0cec2ffc6e4cd9030e46fcc03056": "SQL SELECT * FROM users"
+}

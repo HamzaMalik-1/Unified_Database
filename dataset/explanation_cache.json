@@ -1,0 +1,13 @@
+{
+  "30b805463ace412a07193d2f39d6a898": "This command calculates the average age of all users living in Boston.",
+  "509493e460bd3db36cbde7332819c227": "This command adds a new user record with the username 'ali' to the database table named 'users'.",
+  "07c3768cd0d7c65a481cbd3f900620f1": "This command retrieves all columns of data for every user record stored within the 'users' table in a SQL database system.",
+  "f6f57ce61c007703cb3c42160e8d1349": "This command retrieves all columns and records for each item listed under the 'product' table in a database system.",
+  "4b03653a66256b355c181385a350bb4e": "This command switches the database context to 'testdb'.",
+  "f65fc4660aa0181e90adbf81a11745a6": "This command retrieves all documents stored within the 'docs' collection of a database without specifying any particular fields or conditions.",
+  "3b9bb24e5a1d37e986145d0ead14801a": "Retrieve all documents within the specified collection 'docs'.",
+  "139c4883eb01e5d23c9ff0e44ff29dda": "This command is used to retrieve information from the 'product' table within a SQL database based on specific criteria or queries you define after this keyword.",
+  "56170dd56d664875047c14a5e47d7377": "This command retrieves all columns from the 'orders' table and matches them with corresponding user details in a combined list based on matching IDs between orders and users.",
+  "5891dbd59f5fcbf9ed17c9475482a903": "This command retrieves all columns of data from the 'users' table within a database system.",
+  "013aae4a33e3873d3b6dec60abfe4799": "This command retrieves all columns for every record found within the 'user' table of a database."
+}

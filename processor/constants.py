@@ -143,6 +143,6 @@ NOTNULL_SYNONYMS = {"exists", "filled", "has value", "not null", "not missing", 
 OLLAMA_MODEL = "phi35:latest"
 OLLAMA_URL   = "http://localhost:11434/api/generate"
 OLLAMA_TIMEOUT = 120
-
+EXPLAIN_MODEL = "phi35:latest"   # base model, not your fine-tuned one
 
 GROUP_BY_STOP_WORDS = {"here", "there", "clause", "where", "having", "order", "limit", "offset"}
