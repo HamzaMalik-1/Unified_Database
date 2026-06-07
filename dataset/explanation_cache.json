@@ -9,5 +9,7 @@
   "139c4883eb01e5d23c9ff0e44ff29dda": "This command is used to retrieve information from the 'product' table within a SQL database based on specific criteria or queries you define after this keyword.",
   "56170dd56d664875047c14a5e47d7377": "This command retrieves all columns from the 'orders' table and matches them with corresponding user details in a combined list based on matching IDs between orders and users.",
   "5891dbd59f5fcbf9ed17c9475482a903": "This command retrieves all columns of data from the 'users' table within a database system.",
-  "013aae4a33e3873d3b6dec60abfe4799": "This command retrieves all columns for every record found within the 'user' table of a database."
+  "013aae4a33e3873d3b6dec60abfe4799": "This command retrieves all columns for every record found within the 'user' table of a database.",
+  "13ec6ffa39c440279618638731d8cfe9": "Retrieve all columns for the user record with a specific ID.",
+  "498a2acd036a16a234de3d5cc825edc7": "The command retrieves all columns for every record found within the 'us' table in a database system that uses SQL syntax."
 }

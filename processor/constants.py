@@ -140,7 +140,7 @@ NOTNULL_SYNONYMS = {"exists", "filled", "has value", "not null", "not missing", 
 # ──────────────────────────────────────────────
 #  Ollama / LLM settings
 # ──────────────────────────────────────────────
-OLLAMA_MODEL = "phi35:latest"
+OLLAMA_MODEL = "phi35-finetuned:latest"
 OLLAMA_URL   = "http://localhost:11434/api/generate"
 OLLAMA_TIMEOUT = 120
 EXPLAIN_MODEL = "phi35:latest"   # base model, not your fine-tuned one

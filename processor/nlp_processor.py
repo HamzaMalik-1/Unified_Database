@@ -825,54 +825,59 @@ class NLPProcessor:
         return None
         
     def suggest_full_queries(self, partial_query: str, limit: int = 3) -> list:
-        """
-        Complete a partial SQL/NoSQL command into full valid commands.
-        Uses your fine-tuned model — it knows your SQL/NOSQL prefix format.
-        """
+        # Remove any existing "sql " or "nosql " prefix
+        clean_partial = re.sub(r'^(sql|nosql)\s+', '', partial_query.strip(), flags=re.IGNORECASE)
+        
         schema = self._get_current_schema_as_string()
-
+        
+        # Very strict prompt – instruct to output ONLY the command, nothing else
         prompt = (
-            "You are a database assistant. "
-            "Complete the partial command into a valid executable command. "
-            "Output ONLY the completed command starting with SQL or NOSQL. "
-            "No explanation.\n\n"
             f"Schema: {schema}\n"
-            f"Partial command: {partial_query}\n"
-            f"Completed command:"
+            f"Question: Complete the following SQL/NoSQL query: {clean_partial}\n"
+            f"Output (only the command, no extra words):"
         )
-
+        
         try:
             with httpx.Client(timeout=OLLAMA_TIMEOUT) as client:
                 response = client.post(
-                    f"{OLLAMA_URL}/api/generate",
+                    OLLAMA_URL,
                     json={
                         "model": OLLAMA_MODEL,
                         "prompt": prompt,
                         "stream": False,
                         "options": {
-                            "num_predict": 150,
-                            "temperature": 0.2
+                            "temperature": 0.0,
+                            "num_predict": 80,      # shorter output
+                            "stop": ["\n", "."]     # stop at newline or period
                         }
                     }
                 )
                 response.raise_for_status()
                 raw = response.json().get("response", "").strip()
+                print(f"[Suggest] Raw: {raw}")
         except Exception as e:
-            print(f"[Suggest] Error: {e}", file=sys.stderr)
+            print(f"[Suggest] Error: {e}")
             return []
-
-        # Extract valid commands from output
-        valid = []
+        
+        # Take only the first line that resembles a command
+        commands = []
         for line in raw.split('\n'):
             line = line.strip().rstrip(';')
             if not line:
                 continue
-            upper = line.upper()
-            if upper.startswith("SQL ") or upper.startswith("NOSQL "):
-                valid.append(line)
-            elif upper.startswith(("SELECT", "INSERT", "UPDATE", "DELETE", "CREATE")):
-                valid.append(f"SQL {line}")
-            if len(valid) >= limit:
+            # If it starts with SQL/NOSQL, great
+            if line.upper().startswith(("SQL ", "NOSQL ")):
+                commands.append(line)
                 break
-
-        return valid
+            # If it starts with SELECT/INSERT/etc., add SQL prefix
+            if line.upper().startswith(("SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP")):
+                prefix = "NOSQL" if re.search(r'\b(CONTAINS|PUSH|PULL|ADDTOSET)\b', line, re.IGNORECASE) else "SQL"
+                commands.append(f"{prefix} {line}")
+                break
+            # If it's a short completion like "= 1", prepend the original partial
+            if re.match(r'^[=<>\s\d\w\'\"\(\)]+$', line) and len(line) < 30:
+                full_cmd = f"SQL {clean_partial} {line}".strip()
+                commands.append(full_cmd)
+                break
+        
+        return commands[:limit]
