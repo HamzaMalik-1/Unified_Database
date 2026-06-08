@@ -63,7 +63,7 @@ class SQLParser:
 
     @staticmethod
     def parse_select(sql: str) -> Dict[str, Any]:
-        """Parse SELECT with support for joins, derived tables, subqueries, cross‑model NOSQL subqueries, and DISTINCT."""
+        """Parse SELECT with support for joins, derived tables, subqueries, cross‑model NOSQL subqueries, DISTINCT, and table aliases."""
         sql = sql.strip()
         original_sql_upper = sql.upper()
 
@@ -85,8 +85,6 @@ class SQLParser:
 
         # --- DISTINCT detection (robust) ---
         distinct = False
-        # Use regex to match "DISTINCT" as a whole word, case-insensitive
-        import re
         distinct_match = re.match(r'(?i)^DISTINCT\s+', select_part)
         if distinct_match:
             distinct = True
@@ -114,7 +112,7 @@ class SQLParser:
         from_clause = after_from[:from_end].strip()
         rest = after_from[from_end:].strip() if from_end < len(after_from) else ""
 
-        # --- Parse the FROM clause (supports derived table subqueries) ---
+        # --- Parse the FROM clause (supports derived table subqueries and table aliases) ---
         # Tokenise the FROM clause, treating parenthesised subqueries as single tokens.
         tokens = []
         current = []
@@ -156,10 +154,12 @@ class SQLParser:
         if current:
             tokens.append(''.join(current).strip())
 
-        # Now parse tokens: first table (could be a subquery), then optional ALIAS, then joins
         if not tokens:
             raise ValueError("Invalid FROM clause")
-        main_table = None
+
+        alias_map = {}   # mapping from alias to actual table name (for joins and derived tables)
+        main_table_info = None
+
         # Check if first token is a subquery (starts with '(')
         if tokens[0].startswith('('):
             # It's a derived table: (SELECT ...) AS alias
@@ -168,30 +168,76 @@ class SQLParser:
             if len(tokens) > 1 and tokens[1].upper() == 'AS':
                 if len(tokens) < 3:
                     raise ValueError("Missing alias after AS")
-                main_table = tokens[2]
+                alias = tokens[2]
+                main_table_info = ("derived", alias)   # special marker, actual table name not known
+                alias_map[alias] = "derived"
                 tokens = tokens[3:]
             else:
                 raise ValueError("Derived table requires alias (AS alias)")
         else:
-            main_table = tokens[0]
+            # Parse regular table with optional alias
+            table_part = tokens[0]
+            if ' ' in table_part:
+                parts = table_part.split()
+                if len(parts) == 2:
+                    table_name, alias = parts[0], parts[1]
+                    main_table_info = (table_name, alias)
+                    alias_map[alias] = table_name
+                elif len(parts) == 3 and parts[1].upper() == 'AS':
+                    table_name, _, alias = parts
+                    main_table_info = (table_name, alias)
+                    alias_map[alias] = table_name
+                else:
+                    main_table_info = table_part
+            else:
+                main_table_info = table_part
             tokens = tokens[1:]
 
         # Parse joins (remaining tokens)
-        joins = []
+        joins = []   # each: (join_type, table_name, alias, condition)
         i = 0
         while i < len(tokens):
             token = tokens[i].upper()
             if token == 'INNER':
                 join_type = 'INNER'
                 i += 1
-                # Expect next token to be 'JOIN'
                 if i >= len(tokens) or tokens[i].upper() != 'JOIN':
                     raise ValueError("Expected JOIN after INNER")
                 i += 1
                 if i >= len(tokens):
                     raise ValueError("Missing table after INNER JOIN")
-                join_table = tokens[i]
+                join_table_part = tokens[i]
                 i += 1
+                alias = None
+                # Parse optional alias
+                if i < len(tokens) and tokens[i].upper() not in ('ON', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'JOIN'):
+                    if tokens[i].upper() == 'AS':
+                        i += 1
+                        if i >= len(tokens):
+                            raise ValueError("Missing alias after AS")
+                        alias = tokens[i]
+                        i += 1
+                    else:
+                        alias = tokens[i]
+                        i += 1
+                    if alias:
+                        if ' ' in join_table_part:
+                            parts2 = join_table_part.split()
+                            if len(parts2) == 2:
+                                real_table, _ = parts2[0], parts2[1]
+                                alias_map[alias] = real_table
+                            elif len(parts2) == 3 and parts2[1].upper() == 'AS':
+                                real_table, _, _ = parts2
+                                alias_map[alias] = real_table
+                            else:
+                                alias_map[alias] = join_table_part
+                        else:
+                            alias_map[alias] = join_table_part
+                # Now extract the actual table name (without alias) from join_table_part
+                if ' ' in join_table_part:
+                    join_table = join_table_part.split()[0]
+                else:
+                    join_table = join_table_part
                 if i >= len(tokens) or tokens[i].upper() != 'ON':
                     raise ValueError(f"Missing ON clause for JOIN {join_table}")
                 i += 1
@@ -200,7 +246,7 @@ class SQLParser:
                     condition_parts.append(tokens[i])
                     i += 1
                 condition = ' '.join(condition_parts)
-                joins.append((join_type, join_table, condition))
+                joins.append((join_type, join_table, alias, condition))
             elif token == 'LEFT':
                 join_type = 'LEFT'
                 i += 1
@@ -209,8 +255,36 @@ class SQLParser:
                 i += 1
                 if i >= len(tokens):
                     raise ValueError("Missing table after LEFT JOIN")
-                join_table = tokens[i]
+                join_table_part = tokens[i]
                 i += 1
+                alias = None
+                if i < len(tokens) and tokens[i].upper() not in ('ON', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'JOIN'):
+                    if tokens[i].upper() == 'AS':
+                        i += 1
+                        if i >= len(tokens):
+                            raise ValueError("Missing alias after AS")
+                        alias = tokens[i]
+                        i += 1
+                    else:
+                        alias = tokens[i]
+                        i += 1
+                    if alias:
+                        if ' ' in join_table_part:
+                            parts2 = join_table_part.split()
+                            if len(parts2) == 2:
+                                real_table, _ = parts2[0], parts2[1]
+                                alias_map[alias] = real_table
+                            elif len(parts2) == 3 and parts2[1].upper() == 'AS':
+                                real_table, _, _ = parts2
+                                alias_map[alias] = real_table
+                            else:
+                                alias_map[alias] = join_table_part
+                        else:
+                            alias_map[alias] = join_table_part
+                if ' ' in join_table_part:
+                    join_table = join_table_part.split()[0]
+                else:
+                    join_table = join_table_part
                 if i >= len(tokens) or tokens[i].upper() != 'ON':
                     raise ValueError("Missing ON clause for LEFT JOIN")
                 i += 1
@@ -219,7 +293,7 @@ class SQLParser:
                     condition_parts.append(tokens[i])
                     i += 1
                 condition = ' '.join(condition_parts)
-                joins.append((join_type, join_table, condition))
+                joins.append((join_type, join_table, alias, condition))
             elif token == 'RIGHT':
                 join_type = 'RIGHT'
                 i += 1
@@ -228,8 +302,36 @@ class SQLParser:
                 i += 1
                 if i >= len(tokens):
                     raise ValueError("Missing table after RIGHT JOIN")
-                join_table = tokens[i]
+                join_table_part = tokens[i]
                 i += 1
+                alias = None
+                if i < len(tokens) and tokens[i].upper() not in ('ON', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'JOIN'):
+                    if tokens[i].upper() == 'AS':
+                        i += 1
+                        if i >= len(tokens):
+                            raise ValueError("Missing alias after AS")
+                        alias = tokens[i]
+                        i += 1
+                    else:
+                        alias = tokens[i]
+                        i += 1
+                    if alias:
+                        if ' ' in join_table_part:
+                            parts2 = join_table_part.split()
+                            if len(parts2) == 2:
+                                real_table, _ = parts2[0], parts2[1]
+                                alias_map[alias] = real_table
+                            elif len(parts2) == 3 and parts2[1].upper() == 'AS':
+                                real_table, _, _ = parts2
+                                alias_map[alias] = real_table
+                            else:
+                                alias_map[alias] = join_table_part
+                        else:
+                            alias_map[alias] = join_table_part
+                if ' ' in join_table_part:
+                    join_table = join_table_part.split()[0]
+                else:
+                    join_table = join_table_part
                 if i >= len(tokens) or tokens[i].upper() != 'ON':
                     raise ValueError("Missing ON clause for RIGHT JOIN")
                 i += 1
@@ -238,7 +340,7 @@ class SQLParser:
                     condition_parts.append(tokens[i])
                     i += 1
                 condition = ' '.join(condition_parts)
-                joins.append((join_type, join_table, condition))
+                joins.append((join_type, join_table, alias, condition))
             elif token == 'FULL':
                 join_type = 'FULL'
                 i += 1
@@ -247,8 +349,36 @@ class SQLParser:
                 i += 1
                 if i >= len(tokens):
                     raise ValueError("Missing table after FULL JOIN")
-                join_table = tokens[i]
+                join_table_part = tokens[i]
                 i += 1
+                alias = None
+                if i < len(tokens) and tokens[i].upper() not in ('ON', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'JOIN'):
+                    if tokens[i].upper() == 'AS':
+                        i += 1
+                        if i >= len(tokens):
+                            raise ValueError("Missing alias after AS")
+                        alias = tokens[i]
+                        i += 1
+                    else:
+                        alias = tokens[i]
+                        i += 1
+                    if alias:
+                        if ' ' in join_table_part:
+                            parts2 = join_table_part.split()
+                            if len(parts2) == 2:
+                                real_table, _ = parts2[0], parts2[1]
+                                alias_map[alias] = real_table
+                            elif len(parts2) == 3 and parts2[1].upper() == 'AS':
+                                real_table, _, _ = parts2
+                                alias_map[alias] = real_table
+                            else:
+                                alias_map[alias] = join_table_part
+                        else:
+                            alias_map[alias] = join_table_part
+                if ' ' in join_table_part:
+                    join_table = join_table_part.split()[0]
+                else:
+                    join_table = join_table_part
                 if i >= len(tokens) or tokens[i].upper() != 'ON':
                     raise ValueError("Missing ON clause for FULL JOIN")
                 i += 1
@@ -257,7 +387,7 @@ class SQLParser:
                     condition_parts.append(tokens[i])
                     i += 1
                 condition = ' '.join(condition_parts)
-                joins.append((join_type, join_table, condition))
+                joins.append((join_type, join_table, alias, condition))
             elif token == 'NATURAL':
                 i += 1
                 if i >= len(tokens) or tokens[i].upper() != 'JOIN':
@@ -265,9 +395,37 @@ class SQLParser:
                 i += 1
                 if i >= len(tokens):
                     raise ValueError("Missing table after NATURAL JOIN")
-                join_table = tokens[i]
+                join_table_part = tokens[i]
                 i += 1
-                joins.append(('NATURAL', join_table, None))
+                alias = None
+                if i < len(tokens) and tokens[i].upper() not in ('ON', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'JOIN'):
+                    if tokens[i].upper() == 'AS':
+                        i += 1
+                        if i >= len(tokens):
+                            raise ValueError("Missing alias after AS")
+                        alias = tokens[i]
+                        i += 1
+                    else:
+                        alias = tokens[i]
+                        i += 1
+                    if alias:
+                        if ' ' in join_table_part:
+                            parts2 = join_table_part.split()
+                            if len(parts2) == 2:
+                                real_table, _ = parts2[0], parts2[1]
+                                alias_map[alias] = real_table
+                            elif len(parts2) == 3 and parts2[1].upper() == 'AS':
+                                real_table, _, _ = parts2
+                                alias_map[alias] = real_table
+                            else:
+                                alias_map[alias] = join_table_part
+                        else:
+                            alias_map[alias] = join_table_part
+                if ' ' in join_table_part:
+                    join_table = join_table_part.split()[0]
+                else:
+                    join_table = join_table_part
+                joins.append(('NATURAL', join_table, alias, None))
             elif token == 'CROSS':
                 i += 1
                 if i >= len(tokens) or tokens[i].upper() != 'JOIN':
@@ -275,15 +433,71 @@ class SQLParser:
                 i += 1
                 if i >= len(tokens):
                     raise ValueError("Missing table after CROSS JOIN")
-                join_table = tokens[i]
+                join_table_part = tokens[i]
                 i += 1
-                joins.append(('CROSS', join_table, None))
+                alias = None
+                if i < len(tokens) and tokens[i].upper() not in ('ON', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'JOIN'):
+                    if tokens[i].upper() == 'AS':
+                        i += 1
+                        if i >= len(tokens):
+                            raise ValueError("Missing alias after AS")
+                        alias = tokens[i]
+                        i += 1
+                    else:
+                        alias = tokens[i]
+                        i += 1
+                    if alias:
+                        if ' ' in join_table_part:
+                            parts2 = join_table_part.split()
+                            if len(parts2) == 2:
+                                real_table, _ = parts2[0], parts2[1]
+                                alias_map[alias] = real_table
+                            elif len(parts2) == 3 and parts2[1].upper() == 'AS':
+                                real_table, _, _ = parts2
+                                alias_map[alias] = real_table
+                            else:
+                                alias_map[alias] = join_table_part
+                        else:
+                            alias_map[alias] = join_table_part
+                if ' ' in join_table_part:
+                    join_table = join_table_part.split()[0]
+                else:
+                    join_table = join_table_part
+                joins.append(('CROSS', join_table, alias, None))
             elif token == 'JOIN':
                 join_type = 'INNER'
-                join_table = tokens[i+1] if i+1 < len(tokens) else None
-                if not join_table:
+                join_table_part = tokens[i+1] if i+1 < len(tokens) else None
+                if not join_table_part:
                     raise ValueError("Missing table after JOIN")
                 i += 2
+                alias = None
+                if i < len(tokens) and tokens[i].upper() not in ('ON', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'JOIN'):
+                    if tokens[i].upper() == 'AS':
+                        i += 1
+                        if i >= len(tokens):
+                            raise ValueError("Missing alias after AS")
+                        alias = tokens[i]
+                        i += 1
+                    else:
+                        alias = tokens[i]
+                        i += 1
+                    if alias:
+                        if ' ' in join_table_part:
+                            parts2 = join_table_part.split()
+                            if len(parts2) == 2:
+                                real_table, _ = parts2[0], parts2[1]
+                                alias_map[alias] = real_table
+                            elif len(parts2) == 3 and parts2[1].upper() == 'AS':
+                                real_table, _, _ = parts2
+                                alias_map[alias] = real_table
+                            else:
+                                alias_map[alias] = join_table_part
+                        else:
+                            alias_map[alias] = join_table_part
+                if ' ' in join_table_part:
+                    join_table = join_table_part.split()[0]
+                else:
+                    join_table = join_table_part
                 if i >= len(tokens) or tokens[i].upper() != 'ON':
                     raise ValueError("Missing ON clause for JOIN")
                 i += 1
@@ -292,30 +506,74 @@ class SQLParser:
                     condition_parts.append(tokens[i])
                     i += 1
                 condition = ' '.join(condition_parts)
-                joins.append((join_type, join_table, condition))
+                joins.append((join_type, join_table, alias, condition))
             else:
-                raise ValueError(f"Unexpected token in FROM clause: {token}")
+                raise ValueError(f"Unexpected token in FROM clause: {tokens[i]}")
 
-        # --- Parse SELECT columns (now without the "DISTINCT " prefix) ---
-        if select_part == "*":
-            columns = "*"
-        else:
-            columns = []
-            current = []
-            paren_depth = 0
-            for ch in select_part:
-                if ch == '(':
-                    paren_depth += 1
-                elif ch == ')':
-                    paren_depth -= 1
-                elif ch == ',' and paren_depth == 0:
-                    columns.append(''.join(current).strip())
-                    current = []
-                    continue
+        # --- Parse SELECT columns (now with proper splitting and alias extraction) ---
+        # We'll tokenize the select_part respecting quotes and parentheses.
+        select_items = []   # list of (expression, alias)
+        current = []
+        in_quote = False
+        quote_char = None
+        paren_depth = 0
+
+        for ch in select_part:
+            if ch in ('"', "'") and not in_quote:
+                in_quote = True
+                quote_char = ch
                 current.append(ch)
-            if current:
-                columns.append(''.join(current).strip())
-            columns = [c for c in columns if c]
+            elif ch == quote_char and in_quote:
+                in_quote = False
+                quote_char = None
+                current.append(ch)
+            elif ch == '(' and not in_quote:
+                paren_depth += 1
+                current.append(ch)
+            elif ch == ')' and not in_quote:
+                paren_depth -= 1
+                current.append(ch)
+            elif ch == ',' and not in_quote and paren_depth == 0:
+                # End of current column expression
+                expr_str = ''.join(current).strip()
+                if expr_str:
+                    # Extract alias if present (case-insensitive " AS ")
+                    alias_match = re.search(r'\s+AS\s+(\w+)$', expr_str, re.IGNORECASE)
+                    if alias_match:
+                        alias = alias_match.group(1)
+                        expr = expr_str[:alias_match.start()].strip()
+                        select_items.append((expr, alias))
+                    else:
+                        select_items.append((expr_str, None))
+                current = []
+            else:
+                current.append(ch)
+        # Last item
+        if current:
+            expr_str = ''.join(current).strip()
+            if expr_str:
+                alias_match = re.search(r'\s+AS\s+(\w+)$', expr_str, re.IGNORECASE)
+                if alias_match:
+                    alias = alias_match.group(1)
+                    expr = expr_str[:alias_match.start()].strip()
+                    select_items.append((expr, alias))
+                else:
+                    select_items.append((expr_str, None))
+
+        # Build columns list (for backward compatibility: use alias if present, else expression)
+        columns = []
+        select_expressions = []   # store (expr, alias) for later evaluation by engine
+        for expr, alias in select_items:
+            select_expressions.append((expr, alias))
+            if alias:
+                columns.append(alias)
+            else:
+                # If no alias, use the whole expression as column name (will likely fail, but preserves original behaviour)
+                columns.append(expr)
+
+        # If no columns were found (e.g., SELECT *), treat as "*"
+        if not columns:
+            columns = "*"
 
         # --- Parse WHERE, ORDER BY, LIMIT, GROUP BY, HAVING from the remaining part (rest) ---
         where_cond = None
@@ -351,14 +609,16 @@ class SQLParser:
 
         return {
             "columns": columns,
-            "main_table": main_table,
+            "select_expressions": select_expressions,   # new field for engine to evaluate
+            "main_table": main_table_info,
             "joins": joins,
             "where": where_cond,
             "order_by": order_by,
             "limit": limit,
             "group_by": group_by,
             "having": having,
-            "distinct": distinct          # <-- CRITICAL: return the flag
+            "distinct": distinct,
+            "alias_map": alias_map
         }
          
     @staticmethod
@@ -439,8 +699,6 @@ class SQLParser:
             subqueries.append(("EXISTS", None, sub_sql))
         return subqueries
     
-    # backend/parser/sql_parser.py (add inside SQLParser class)
-
     @staticmethod
     def parse_create_index(sql: str) -> Dict[str, Any]:
         """
@@ -456,7 +714,6 @@ class SQLParser:
             "column": match.group(3)
         }
 
-
     @staticmethod
     def parse_drop_index(sql: str) -> str:
         """
@@ -467,8 +724,6 @@ class SQLParser:
         if not match:
             raise ValueError("Invalid DROP INDEX syntax. Expected: DROP INDEX index_name")
         return match.group(1)
-    
-    
     
     @staticmethod
     def parse_alter_table(sql: str) -> Dict[str, Any]:
@@ -579,7 +834,6 @@ class SQLParser:
                 "column": drop_default_match.group(2)
             }
         raise ValueError("Invalid ALTER TABLE syntax")
-
 
     @staticmethod
     def parse_create_table(sql: str) -> Dict[str, Any]:
@@ -704,7 +958,6 @@ class SQLParser:
             "checks": checks
         }
     
-    
     @staticmethod
     def _parse_foreign_key_clause(clause: str) -> Dict[str, Any]:
         """
@@ -735,7 +988,6 @@ class SQLParser:
             "on_update": on_update
         }
         
-            
     @staticmethod
     def parse_create_view(sql: str) -> Dict[str, Any]:
         pattern = r"CREATE\s+VIEW\s+(\w+)\s+AS\s+(SELECT\s+.+)"
@@ -836,5 +1088,3 @@ class SQLParser:
         if not match:
             raise ValueError("Invalid DROP TRIGGER syntax")
         return match.group(1)
-    
-    

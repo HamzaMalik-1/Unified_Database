@@ -17,7 +17,7 @@ class SQLDatabase:
         if 'foreign_keys' not in self.storage.data:
             self.storage.data['foreign_keys'] = {}
         if 'check_constraints' not in self.storage.data:
-            self.storage.data['check_constraints'] = {}   # <-- FIXED
+            self.storage.data['check_constraints'] = {}
         if 'auto_increment' not in self.storage.data:
             self.storage.data['auto_increment'] = {}
         if 'views' not in self.storage.data:
@@ -40,7 +40,6 @@ class SQLDatabase:
                 if result.startswith("Error:"):
                     return ResponseFactory.error(result, status=400)
                 return ResponseFactory.text(result)
-            # ----- CTE (WITH) support -----
             elif cmd_upper.startswith("WITH"):
                 result_str = self._execute_with(command)
                 if result_str.startswith("Error:"):
@@ -53,8 +52,6 @@ class SQLDatabase:
                         return ResponseFactory.json(rows, message="Query executed successfully")
                 except:
                     return ResponseFactory.text(result_str, message="Query executed successfully")
-            
-            # Check for set operations (UNION, INTERSECT, EXCEPT) before normal SELECT
             elif cmd_upper.startswith("SELECT") and any(kw in cmd_upper for kw in ('UNION', 'INTERSECT', 'EXCEPT')):
                 result_str = self._execute_set_operation(command)
                 if result_str.startswith("Error:"):
@@ -67,8 +64,6 @@ class SQLDatabase:
                         return ResponseFactory.json(rows, message="Query executed successfully")
                 except:
                     return ResponseFactory.text(result_str, message="Query executed successfully")
-            
-            
             elif cmd_upper.startswith("INSERT INTO") and "SELECT" in cmd_upper and "FROM NOSQL" in cmd_upper:
                 result = self._insert_from_nosql(command)
                 if result.startswith("Error:"):
@@ -131,7 +126,6 @@ class SQLDatabase:
                 if result.startswith("Error:"):
                     return ResponseFactory.error(result, status=400)
                 return ResponseFactory.text(result)
-            
             elif cmd_upper.startswith("CREATE PROCEDURE"):
                 result = self._create_procedure(command)
                 if result.startswith("Error:"):
@@ -144,7 +138,6 @@ class SQLDatabase:
                 return ResponseFactory.text(result)
             elif cmd_upper.startswith("CALL"):
                 return self._call_procedure(command)
-            
             elif cmd_upper.startswith("CREATE TRIGGER"):
                 result = self._create_trigger(command)
                 if result.startswith("Error:"):
@@ -162,28 +155,28 @@ class SQLDatabase:
             return ResponseFactory.error(str(e), status=500)
 
     def _create_table(self, sql: str) -> str:
-            try:
-                parsed = SQLParser.parse_create_table(sql)
-                table_name = parsed["table_name"]
-                columns = parsed["columns"]
-                foreign_keys = parsed.get("foreign_keys", [])
-                checks = parsed.get("checks", [])                     # <-- ADDED
-                if self.storage.get_schema(table_name):
-                    return f"Error: Table '{table_name}' already exists"
-                self.storage.set_schema(table_name, columns)
-                self.storage.set_table_data(table_name, [])
-                self.storage.data['foreign_keys'][table_name] = foreign_keys
-                self.storage.data['check_constraints'][table_name] = checks   # <-- ADDED
-                for col in columns:
-                    if col.get('auto_increment'):
-                        self.storage.data['auto_increment'][table_name] = 0
-                        break
-                self.storage.save()
-                logger.info(f"Table '{table_name}' created with {len(foreign_keys)} foreign keys, {len(checks)} checks")
-                return f"Table '{table_name}' created successfully"
-            except Exception as e:
-                logger.error(f"CREATE TABLE failed: {e}")
-                return f"Error: {e}"
+        try:
+            parsed = SQLParser.parse_create_table(sql)
+            table_name = parsed["table_name"]
+            columns = parsed["columns"]
+            foreign_keys = parsed.get("foreign_keys", [])
+            checks = parsed.get("checks", [])
+            if self.storage.get_schema(table_name):
+                return f"Error: Table '{table_name}' already exists"
+            self.storage.set_schema(table_name, columns)
+            self.storage.set_table_data(table_name, [])
+            self.storage.data['foreign_keys'][table_name] = foreign_keys
+            self.storage.data['check_constraints'][table_name] = checks
+            for col in columns:
+                if col.get('auto_increment'):
+                    self.storage.data['auto_increment'][table_name] = 0
+                    break
+            self.storage.save()
+            logger.info(f"Table '{table_name}' created with {len(foreign_keys)} foreign keys, {len(checks)} checks")
+            return f"Table '{table_name}' created successfully"
+        except Exception as e:
+            logger.error(f"CREATE TABLE failed: {e}")
+            return f"Error: {e}"
 
     def _insert(self, sql: str) -> str:
         try:
@@ -217,7 +210,6 @@ class SQLDatabase:
                 constraints = col_def["constraints"]
                 val = value_dict.get(col_name, None)
 
-                # ----- Auto‑increment (highest priority) -----
                 if col_def.get('auto_increment'):
                     if val is None:
                         counter = self.storage.data['auto_increment'].get(table_name, 0) + 1
@@ -245,7 +237,6 @@ class SQLDatabase:
                         except ValueError as e:
                             return f"Error in column '{col_name}': {e}"
 
-                # ----- Constraints -----
                 if "NOT NULL" in constraints and typed_val is None:
                     return f"Error: Column '{col_name}' cannot be NULL"
                 if "PRIMARY KEY" in constraints:
@@ -260,10 +251,8 @@ class SQLDatabase:
                         return f"Error: {e}"
                 row[col_name] = typed_val
 
-            # ---------- Fire BEFORE INSERT triggers ----------
             self._fire_triggers(table_name, "BEFORE", "INSERT", new_row=row)
 
-            # CHECK constraints and foreign keys
             error = self._check_constraints(table_name, row)
             if error:
                 return error
@@ -275,7 +264,6 @@ class SQLDatabase:
             self.storage.set_table_data(table_name, existing_rows)
             logger.info(f"Inserted row into '{table_name}': {row}")
 
-            # ---------- Fire AFTER INSERT triggers ----------
             self._fire_triggers(table_name, "AFTER", "INSERT", new_row=row)
 
             return "Insert successful"
@@ -284,24 +272,12 @@ class SQLDatabase:
             return f"Error: {e}"
 
     def _get_nested(self, doc: Dict, path: str) -> Any:
-        """Retrieve a value from a document using dot notation.
-        For SQL engine, we only need top‑level keys, but this method
-        exists to satisfy calls from _evaluate_condition (which was copied from NoSQL).
-        """
-        # If the path contains a dot, treat as top‑level key? In SQL we don't need nested.
-        # For simplicity, just return the top‑level value.
         return doc.get(path, None)
 
     def _evaluate_condition(self, row: Dict, condition_str: str) -> bool:
-        """
-        Evaluate a WHERE condition for a single row (SQL engine).
-        Supports standard comparison operators (==, !=, >, <, >=, <=)
-        and logical AND/OR via eval (safe because row values are sanitised).
-        """
         if not condition_str:
             return True
         cond = condition_str.strip()
-        # Replace single '=' with '==' but keep '<=', '>=', '!=', etc.
         cond = re.sub(r'(?<![<>!=])=(?![=])', '==', cond)
         try:
             result = eval(cond, {"__builtins__": {}}, row)
@@ -366,8 +342,13 @@ class SQLDatabase:
     def _select(self, sql: str, depth: int = 0) -> str:
         try:
             parsed = SQLParser.parse_select(sql)
-            main_table = parsed.get("main_table", parsed.get("table"))
-            joins = parsed.get("joins", [])
+            main_info = parsed["main_table"]   # can be string or (table_name, alias)
+            if isinstance(main_info, tuple):
+                main_table, main_alias = main_info
+            else:
+                main_table, main_alias = main_info, None
+
+            joins = parsed.get("joins", [])          # list of (join_type, table_name, alias, condition)
             where_cond = parsed["where"]
             order_by = parsed["order_by"]
             limit = parsed["limit"]
@@ -375,8 +356,8 @@ class SQLDatabase:
             having_cond = parsed["having"]
             columns_spec = parsed["columns"]
             distinct = parsed.get("distinct", False)
+            alias_map = parsed.get("alias_map", {})
 
-            # Fallback: if DISTINCT appears in the original SQL but flag is missing, force it
             if not distinct and " DISTINCT " in sql.upper():
                 distinct = True
 
@@ -397,11 +378,16 @@ class SQLDatabase:
                 rows = self.storage.get_table_data(main_table)
                 if not rows:
                     rows = []
-                for join_type, join_table, condition in joins:
+                # Process joins with aliases
+                for join_type, join_table, join_alias, condition in joins:
                     right_rows = self.storage.get_table_data(join_table)
                     if not right_rows:
                         right_rows = []
-                    rows = self._join_rows(rows, right_rows, join_type, condition)
+                    # left alias is main_alias for the first join, then None after first join
+                    left_alias = main_alias if len(rows) > 0 and main_alias else None
+                    rows = self._join_rows(rows, right_rows, join_type, condition, left_alias, join_alias)
+                    # After first join, left side is the combined result, so we can't keep using main_alias
+                    main_alias = None
                 if not rows:
                     return "[]"
 
@@ -506,9 +492,8 @@ class SQLDatabase:
                         logger.error(f"Subquery execution failed: {e}")
                         return f"Error in subquery: {e}"
 
-                    # ----- correlated EXISTS / NOT EXISTS -----
+            # ----- correlated EXISTS / NOT EXISTS -----
             if where_cond and re.search(r'\b(NOT\s+)?EXISTS\s*\(', where_cond, re.IGNORECASE):
-                # Find the first EXISTS (or NOT EXISTS) pattern
                 exists_pattern = r'(\bNOT\s+)?EXISTS\s*\(\s*(SELECT\s+.+?)\s*\)'
                 match = re.search(exists_pattern, where_cond, re.IGNORECASE | re.DOTALL)
                 if match:
@@ -522,11 +507,18 @@ class SQLDatabase:
                         if exists:
                             filtered_rows.append(row)
                     rows = filtered_rows
-                    where_cond = None   # Remove the condition because it has been applied
+                    where_cond = None
 
             # Apply WHERE
             if where_cond:
-                rows = [r for r in rows if self._evaluate_condition(r, where_cond)]
+                # Resolve any alias.column references in WHERE clause
+                resolved_where = where_cond
+                # Replace alias.column with just column (since our rows already have the column name)
+                # This is a simplification: we remove the alias prefix.
+                for alias, real_table in alias_map.items():
+                    pattern = rf'\b{re.escape(alias)}\.'
+                    resolved_where = re.sub(pattern, '', resolved_where)
+                rows = [r for r in rows if self._evaluate_condition(r, resolved_where)]
 
             # Attach scalar subquery values
             if scalar_subqueries:
@@ -598,21 +590,28 @@ class SQLDatabase:
                         rows = [row_result]
 
             # ========== FINAL COLUMN PROJECTION ==========
-            # (apply only if there is no GROUP BY and no aggregate functions)
             if final_columns != "*" and not group_by and not agg_specs:
-                out_cols = final_columns
+                out_cols = []
+                for col_expr in final_columns:
+                    # Remove any alias prefix (e.g., "e.id" -> "id")
+                    if '.' in col_expr:
+                        _, col_name = col_expr.split('.', 1)
+                        out_cols.append(col_name)
+                    else:
+                        out_cols.append(col_expr)
                 projected_rows = []
                 for row in rows:
-                    new_row = {col: row.get(col) for col in out_cols}
+                    new_row = {}
+                    for col in out_cols:
+                        new_row[col] = row.get(col)
                     projected_rows.append(new_row)
                 rows = projected_rows
 
-            # ========== DISTINCT (remove duplicate rows based on projected columns) ==========
+            # ========== DISTINCT ==========
             if distinct:
                 seen = set()
                 unique_rows = []
                 for row in rows:
-                    # Use sorted items to make row hashable and order-independent
                     row_tuple = tuple(sorted(row.items()))
                     if row_tuple not in seen:
                         seen.add(row_tuple)
@@ -636,7 +635,7 @@ class SQLDatabase:
         except Exception as e:
             logger.error(f"SELECT failed: {e}")
             return f"Error: {e}"
-            
+
     def _update(self, sql: str) -> str:
         try:
             parsed = SQLParser.parse_update(sql)
@@ -651,15 +650,12 @@ class SQLDatabase:
             if not rows:
                 return "Update completed (0 rows affected)"
 
-            # ---------- Cross‑model IN subqueries (SQL with NoSQL) ----------
             if where_cond and "NOSQL SELECT" in where_cond.upper() and self.nosql_engine:
-                import re
                 pattern = r"(\w+)\s+IN\s*\(\s*NOSQL\s+(SELECT.+?)\s*\)"
                 match = re.search(pattern, where_cond, re.IGNORECASE | re.DOTALL)
                 if match:
                     outer_column = match.group(1)
                     inner_nosql_sql = match.group(2).strip()
-                    # Execute NoSQL command (the inner SELECT without the NOSQL prefix)
                     resp = self.nosql_engine.execute(inner_nosql_sql)
                     if not resp.success:
                         return f"Error in cross-model subquery: {resp.message}"
@@ -669,12 +665,9 @@ class SQLDatabase:
                     elif resp.data.type == "json":
                         if isinstance(resp.data.content, list):
                             values = [list(item.values())[0] for item in resp.data.content if item]
-                    # Pre‑filter rows
                     rows = [r for r in rows if r.get(outer_column) in values]
                     where_cond = None
-            # -----------------------------------------------------------------
 
-            # Validate column existence and types
             schema_cols = {col["name"]: col for col in schema}
             for col in set_assignments.keys():
                 if col not in schema_cols:
@@ -682,11 +675,9 @@ class SQLDatabase:
 
             updated_count = 0
             for row in rows:
-                # Check WHERE condition (if any left)
                 if where_cond and not self._evaluate_condition(row, where_cond):
                     continue
 
-                # Apply updates to a copy to avoid partial updates if constraints fail
                 updated_row = row.copy()
                 for col, val in set_assignments.items():
                     col_def = schema_cols[col]
@@ -696,24 +687,19 @@ class SQLDatabase:
                         return f"Error in column '{col}': {e}"
                     if typed_val is None and "NOT NULL" in col_def["constraints"]:
                         return f"Error: Column '{col}' cannot be NULL"
-                    # Foreign key check
                     if not self._check_parent_exists(table_name, col, typed_val):
                         return f"Error: Foreign key violation on {col}: value {typed_val} not found in parent table"
                     updated_row[col] = typed_val
 
-                # CHECK CONSTRAINTS AFTER UPDATE
                 error = self._check_constraints(table_name, updated_row)
                 if error:
                     return error
 
-                # ---------- Fire BEFORE UPDATE trigger ----------
                 self._fire_triggers(table_name, "BEFORE", "UPDATE", old_row=row, new_row=updated_row)
 
-                # Apply the update to the real row
                 for col, val in set_assignments.items():
                     row[col] = updated_row[col]
 
-                # ---------- Fire AFTER UPDATE trigger ----------
                 self._fire_triggers(table_name, "AFTER", "UPDATE", old_row=row, new_row=updated_row)
 
                 updated_count += 1
@@ -724,7 +710,7 @@ class SQLDatabase:
         except Exception as e:
             logger.error(f"UPDATE failed: {e}")
             return f"Error: {e}"
-        
+
     def _delete(self, sql: str) -> str:
         try:
             parsed = SQLParser.parse_delete(sql)
@@ -737,9 +723,7 @@ class SQLDatabase:
             if not rows:
                 return "Delete completed (0 rows affected)"
 
-            # ---------- Cross‑model IN subqueries (SQL with NoSQL) ----------
             if where_cond and "NOSQL SELECT" in where_cond.upper() and self.nosql_engine:
-                import re
                 pattern = r"(\w+)\s+IN\s*\(\s*NOSQL\s+(SELECT.+?)\s*\)"
                 match = re.search(pattern, where_cond, re.IGNORECASE | re.DOTALL)
                 if match:
@@ -754,18 +738,14 @@ class SQLDatabase:
                     elif resp.data.type == "json":
                         if isinstance(resp.data.content, list):
                             values = [list(item.values())[0] for item in resp.data.content if item]
-                    # Pre‑filter rows
                     rows = [r for r in rows if r.get(outer_column) in values]
                     where_cond = None
-            # ---------------------------------------------------------------
 
-            # Identify rows to delete (apply remaining WHERE condition, if any)
             to_delete = []
             for row in rows:
                 if where_cond is None or self._evaluate_condition(row, where_cond):
                     to_delete.append(row)
 
-            # Check foreign key dependencies (RESTRICT/NO ACTION)
             for row in to_delete:
                 for col_name, col_val in row.items():
                     for child_table, fk_list in self.storage.data['foreign_keys'].items():
@@ -779,19 +759,15 @@ class SQLDatabase:
                                         if child_row.get(child_col) == col_val:
                                             return f"Error: Cannot delete row because child row exists in {child_table}.{child_col}"
 
-            # Fire BEFORE DELETE triggers
             for row in to_delete:
                 self._fire_triggers(table_name, "BEFORE", "DELETE", old_row=row)
 
-            # Delete rows
             new_rows = [r for r in rows if r not in to_delete]
             self.storage.set_table_data(table_name, new_rows)
 
-            # Fire AFTER DELETE triggers
             for row in to_delete:
                 self._fire_triggers(table_name, "AFTER", "DELETE", old_row=row)
 
-            # Handle CASCADE / SET NULL after deletion
             for row in to_delete:
                 for col_name, col_val in row.items():
                     self._handle_child_references(table_name, col_name, col_val, is_delete=True)
@@ -804,7 +780,6 @@ class SQLDatabase:
             return f"Error: {e}"
 
     def _check_child_references_before_delete(self, parent_table: str, parent_row: Dict):
-        """Before deleting a parent row, ensure child references are allowed (RESTRICT/NO ACTION)."""
         for child_table, fk_list in self.storage.data['foreign_keys'].items():
             for fk in fk_list:
                 if fk["ref_table"] == parent_table:
@@ -817,7 +792,6 @@ class SQLDatabase:
                                 raise Exception(f"Referenced row exists in {child_table}.{child_col}; cannot delete parent")
 
     def _cascade_delete(self, parent_table: str, parent_row: Dict):
-        """Perform CASCADE or SET NULL on child tables when parent row is deleted."""
         for child_table, fk_list in self.storage.data['foreign_keys'].items():
             for fk in fk_list:
                 if fk["ref_table"] == parent_table:
@@ -842,7 +816,6 @@ class SQLDatabase:
             table_name = SQLParser.parse_drop_table(sql)
             if not self.storage.get_schema(table_name):
                 return f"Error: Table '{table_name}' does not exist"
-            # Also remove foreign keys referencing this table? For simplicity, we remove the table's own fk definitions.
             if table_name in self.storage.data['foreign_keys']:
                 del self.storage.data['foreign_keys'][table_name]
             del self.storage.data["schemas"][table_name]
@@ -892,92 +865,33 @@ class SQLDatabase:
 
     def _evaluate_join_condition(self, row1: Dict, row2: Dict, condition: str,
                                   alias1: str = None, alias2: str = None) -> bool:
-        """
-        Evaluate a JOIN ON condition for a pair of rows.
-
-        Strategy:
-          1. Extract all "table.column" references from the condition string itself.
-          2. Determine which table name maps to row1 vs row2 by checking which
-             referenced columns exist in each row's keys.
-          3. Substitute qualified references (table.column → value) first.
-          4. Substitute any remaining unqualified references, sorting by column
-             name length descending to prevent partial matches (e.g. department_id
-             must be replaced before id).
-          5. Fix single '=' → '==' and eval.
-        """
         if not condition:
             return True
-
         cond = condition
 
-        # Step 1: Extract all "word.word" qualified references from the condition
-        qualified_refs = re.findall(r'\b(\w+)\.(\w+)\b', cond)
+        # Replace alias.column with the column's value
+        if alias1:
+            for col_name, col_val in row1.items():
+                cond = re.sub(rf'\b{re.escape(alias1)}\.{re.escape(col_name)}\b', repr(col_val), cond)
+        if alias2:
+            for col_name, col_val in row2.items():
+                cond = re.sub(rf'\b{re.escape(alias2)}\.{re.escape(col_name)}\b', repr(col_val), cond)
 
-        if qualified_refs:
-            # Unique table names mentioned, preserving first-seen order
-            table_names = list(dict.fromkeys(t for t, c in qualified_refs))
-
-            row1_keys = set(row1.keys())
-            row2_keys = set(row2.keys())
-
-            row1_table = None
-            row2_table = None
-
-            for tname in table_names:
-                cols_for_table = [c for t, c in qualified_refs if t == tname]
-                row1_matches = sum(1 for c in cols_for_table if c in row1_keys)
-                row2_matches = sum(1 for c in cols_for_table if c in row2_keys)
-
-                if row1_matches >= row2_matches:
-                    if row1_table is None:
-                        row1_table = tname
-                    elif row2_table is None:
-                        row2_table = tname
-                else:
-                    if row2_table is None:
-                        row2_table = tname
-                    elif row1_table is None:
-                        row1_table = tname
-
-            # Fallback to aliases if detection failed
-            row1_table = row1_table or alias1
-            row2_table = row2_table or alias2
-
-            # Step 2: Replace qualified "table.column" → repr(value)
-            # Sort by column name length descending to avoid partial replacements
-            if row1_table:
-                for col_name, col_val in sorted(row1.items(), key=lambda x: len(x[0]), reverse=True):
-                    cond = re.sub(
-                        rf'\b{re.escape(row1_table)}\.{re.escape(col_name)}\b',
-                        repr(col_val), cond
-                    )
-
-            if row2_table:
-                for col_name, col_val in sorted(row2.items(), key=lambda x: len(x[0]), reverse=True):
-                    cond = re.sub(
-                        rf'\b{re.escape(row2_table)}\.{re.escape(col_name)}\b',
-                        repr(col_val), cond
-                    )
-
-        # Step 3: Replace any remaining unqualified column references
-        # Negative lookbehind (?<![\w.]) ensures we don't re-match inside already-substituted values
-        # Sort longest first: department_id before id
+        # Replace any remaining unqualified column names (longest first)
         for col_name, col_val in sorted(row1.items(), key=lambda x: len(x[0]), reverse=True):
             cond = re.sub(rf'(?<![\w.]){re.escape(col_name)}\b', repr(col_val), cond)
-
         for col_name, col_val in sorted(row2.items(), key=lambda x: len(x[0]), reverse=True):
             cond = re.sub(rf'(?<![\w.]){re.escape(col_name)}\b', repr(col_val), cond)
 
-        # Step 4: Fix single = to ==
         cond = re.sub(r'(?<![<>!=])=(?!=)', '==', cond)
-
         try:
             return bool(eval(cond, {"__builtins__": {}}))
         except Exception as e:
             logger.error(f"JOIN eval failed: '{cond}' → {e}")
             return False
 
-    def _join_rows(self, left_rows: List[Dict], right_rows: List[Dict], join_type: str, condition: str, left_alias: str = None, right_alias: str = None) -> List[Dict]:
+    def _join_rows(self, left_rows: List[Dict], right_rows: List[Dict], join_type: str, condition: str,
+                   left_alias: str = None, right_alias: str = None) -> List[Dict]:
         if not left_rows or not right_rows:
             if join_type == 'LEFT':
                 right_cols = set()
@@ -1113,8 +1027,7 @@ class SQLDatabase:
             return result
         else:
             raise ValueError(f"Unsupported join type: {join_type}")
-        
-        
+
     def _create_index(self, sql: str) -> str:
         try:
             parsed = SQLParser.parse_create_index(sql)
@@ -1161,7 +1074,6 @@ class SQLDatabase:
             return f"Error: {e}"
 
     def _find_index_for_condition(self, table: str, condition_str: str) -> Optional[Tuple[str, Any]]:
-        import re
         match = re.match(r'^\s*(\w+)\s*=\s*(.+)$', condition_str)
         if not match:
             return None
@@ -1180,8 +1092,7 @@ class SQLDatabase:
             if idx_info["table"] == table and idx_info["column"] == column:
                 return (idx_name, value)
         return None
-    
-        
+
     def _alter_table(self, sql: str) -> str:
         try:
             parsed = SQLParser.parse_alter_table(sql)
@@ -1306,7 +1217,6 @@ class SQLDatabase:
             return f"Error: {e}"
 
     def _check_parent_exists(self, child_table: str, col: str, value: Any) -> bool:
-        """Check if value exists in the referenced parent column."""
         foreign_keys = self.storage.data['foreign_keys'].get(child_table, [])
         for fk in foreign_keys:
             if fk["column"] == col:
@@ -1317,10 +1227,9 @@ class SQLDatabase:
                     if row.get(parent_col) == value:
                         return True
                 return False
-        return True  # no foreign key for this column
+        return True
 
     def _handle_child_references(self, parent_table: str, parent_col: str, old_value: Any, new_value: Any = None, is_delete: bool = False):
-        """When parent row is updated or deleted, cascade changes to child tables."""
         for child_table, fk_list in self.storage.data['foreign_keys'].items():
             for fk in fk_list:
                 if fk["ref_table"] == parent_table and fk["ref_column"] == parent_col:
@@ -1335,7 +1244,6 @@ class SQLDatabase:
                                 if not is_delete:
                                     row[child_col] = new_value
                                     new_child_rows.append(row)
-                                # else: delete row – do not add
                             else:
                                 new_child_rows.append(row)
                         self.storage.set_table_data(child_table, new_child_rows)
@@ -1352,16 +1260,14 @@ class SQLDatabase:
                                 raise Exception(f"Referenced row exists in {child_table}.{child_col}")
                     if updated:
                         self.storage.save()
-                            
+
     def _check_constraints(self, table_name: str, row: Dict) -> Optional[str]:
         checks = self.storage.data['check_constraints'].get(table_name, [])
         for expr in checks:
-            # Evaluate expression using existing _evaluate_condition (which uses eval with row as locals)
             if not self._evaluate_condition(row, expr):
                 return f"Check constraint violated: {expr}"
         return None
-    
-    
+
     def _create_view(self, sql: str) -> str:
         try:
             parsed = SQLParser.parse_create_view(sql)
@@ -1389,10 +1295,7 @@ class SQLDatabase:
         except Exception as e:
             logger.error(f"DROP VIEW failed: {e}")
             return f"Error: {e}"
-        
-        
-        
-        
+
     def _create_procedure(self, sql: str) -> str:
         try:
             parsed = SQLParser.parse_create_procedure(sql)
@@ -1443,14 +1346,11 @@ class SQLDatabase:
                 else:
                     arg_repr = str(arg)
                 substituted = re.sub(rf'\${i}\b', arg_repr, substituted)
-            # Execute the raw SQL command (no prefix)
             return self.execute(substituted)
         except Exception as e:
             logger.error(f"CALL failed: {e}")
             return ResponseFactory.error(str(e), status=500)
-        
-            
-            
+
     def _create_trigger(self, sql: str) -> str:
         try:
             parsed = SQLParser.parse_create_trigger(sql)
@@ -1490,19 +1390,13 @@ class SQLDatabase:
         if new_row:
             for col, val in new_row.items():
                 statement = re.sub(rf'NEW\.{col}\b', repr(val), statement)
-        # Do NOT add SQL prefix
         logger.info(f"Executing trigger: {statement}")
         result = self.execute(statement)
         if not result.success:
             logger.error(f"Trigger failed: {result.message}")
 
     def _insert_from_nosql(self, sql: str) -> str:
-        """
-        Parses: INSERT INTO table (col1, col2, ...) SELECT col1, col2, ... FROM NOSQL (nosql_select_command)
-        Optimized for bulk insert: collects all rows, then appends once.
-        """
         try:
-            # Pattern: INSERT INTO table (cols) SELECT cols FROM NOSQL (subquery)
             pattern = r"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)\s+SELECT\s+(.+)\s+FROM\s+NOSQL\s+\((.+)\)"
             match = re.match(pattern, sql, re.IGNORECASE | re.DOTALL)
             if not match:
@@ -1518,14 +1412,12 @@ class SQLDatabase:
             if len(target_cols) != len(select_cols):
                 return f"Error: Number of target columns ({len(target_cols)}) does not match number of selected columns ({len(select_cols)})"
 
-            # Execute NoSQL subquery once
             if not self.nosql_engine:
                 return "Error: NoSQL engine not available"
             nosql_resp = self.nosql_engine.execute(nosql_subquery)
             if not nosql_resp.success:
                 return f"Error in NoSQL subquery: {nosql_resp.message}"
 
-            # Extract documents from NoSQL result
             documents = []
             if nosql_resp.data.type == "table":
                 documents = nosql_resp.data.content
@@ -1537,7 +1429,6 @@ class SQLDatabase:
             else:
                 return "Error: NoSQL subquery did not return a list of documents"
 
-            # Get target table schema and existing rows
             schema = self.storage.get_schema(table_name)
             if not schema:
                 return f"Error: Table '{table_name}' does not exist"
@@ -1546,15 +1437,12 @@ class SQLDatabase:
             new_rows = []
             inserted_count = 0
 
-            # For each document, build a row dictionary (value validation, constraints, triggers)
             for doc in documents:
-                # Build value dict from document using selected column paths
                 value_dict = {}
                 for tcol, scol in zip(target_cols, select_cols):
                     val = self._get_nested_nosql(doc, scol)
                     value_dict[tcol] = val
 
-                # Build the row (replicating _insert logic without writing to storage yet)
                 row = {}
                 for col_def in schema:
                     col_name = col_def["name"]
@@ -1562,7 +1450,6 @@ class SQLDatabase:
                     constraints = col_def["constraints"]
                     val = value_dict.get(col_name, None)
 
-                    # Auto‑increment handling
                     if col_def.get('auto_increment'):
                         if val is None:
                             counter = self.storage.data['auto_increment'].get(table_name, 0) + 1
@@ -1590,12 +1477,10 @@ class SQLDatabase:
                             except ValueError as e:
                                 return f"Error in column '{col_name}': {e}"
 
-                    # Constraints
                     if "NOT NULL" in constraints and typed_val is None:
                         return f"Error: Column '{col_name}' cannot be NULL"
                     if "PRIMARY KEY" in constraints:
                         try:
-                            # Check against existing_rows + already built new_rows
                             SQLConstraint.check_primary_key(typed_val, col_name, existing_rows + new_rows, len(existing_rows) + len(new_rows))
                         except ValueError as e:
                             return f"Error: {e}"
@@ -1606,7 +1491,6 @@ class SQLDatabase:
                             return f"Error: {e}"
                     row[col_name] = typed_val
 
-                # CHECK constraints and foreign keys
                 error = self._check_constraints(table_name, row)
                 if error:
                     return error
@@ -1614,18 +1498,15 @@ class SQLDatabase:
                     if not self._check_parent_exists(table_name, col_name, col_val):
                         return f"Error: Foreign key violation on {col_name}: value {col_val} not found"
 
-                # Fire BEFORE INSERT trigger (per row)
                 self._fire_triggers(table_name, "BEFORE", "INSERT", new_row=row)
 
                 new_rows.append(row)
                 inserted_count += 1
 
-            # Bulk append all new rows
             existing_rows.extend(new_rows)
             self.storage.set_table_data(table_name, existing_rows)
             self.storage.save()
 
-            # Fire AFTER INSERT triggers for each inserted row
             for row in new_rows:
                 self._fire_triggers(table_name, "AFTER", "INSERT", new_row=row)
 
@@ -1637,7 +1518,6 @@ class SQLDatabase:
             return f"Error: {e}"
 
     def _get_nested_nosql(self, doc: Dict, path: str) -> Any:
-        """Retrieve value from nested document using dot notation (e.g., 'address.city')."""
         parts = path.split('.')
         current = doc
         for p in parts:
@@ -1648,7 +1528,6 @@ class SQLDatabase:
         return current
 
     def _quote_value(self, val: Any) -> str:
-        """Return SQL‑quoted representation of a value."""
         if val is None:
             return "NULL"
         if isinstance(val, str):
@@ -1656,12 +1535,9 @@ class SQLDatabase:
         if isinstance(val, (int, float)):
             return str(val)
         if isinstance(val, dict):
-            # Convert dict to JSON string (single‑quoted for SQL)
             return f"'{json.dumps(val)}'"
         return f"'{val}'"
-    
-        
-    # ---------- Statistics and Schema ----------
+
     def get_stats(self) -> Dict[str, Any]:
         schemas = self.storage.data.get('schemas', {})
         tables = self.storage.data.get('tables', {})
@@ -1682,7 +1558,7 @@ class SQLDatabase:
                 "foreign_keys": len(foreign_keys.get(table_name, [])),
                 "check_constraints": len(check_constraints.get(table_name, [])),
                 "auto_increment_counter": auto_increment.get(table_name),
-                "schema": schema   # full column definitions
+                "schema": schema
             }
 
         view_list = list(views.keys())
@@ -1701,16 +1577,9 @@ class SQLDatabase:
         }
 
     def get_schema(self, table_name: str):
-        """Return schema (columns) for a table, or None if table does not exist."""
         return self.storage.get_schema(table_name)
-    
-    
+
     def _execute_set_operation(self, sql: str, depth: int = 0) -> str:
-        """
-        Execute a set operation (UNION, INTERSECT, EXCEPT) and return JSON result.
-        Handles simple top-level operation without parentheses.
-        Also supports literal SELECTs without FROM.
-        """
         sql_upper = sql.upper()
         depth_paren = 0
         op_pos = -1
@@ -1739,20 +1608,16 @@ class SQLDatabase:
         left_sql = sql[:op_pos].strip()
         right_sql = sql[op_pos + len(op_type):].strip()
 
-        # Remove any leading 'SQL ' or 'NOSQL ' (just in case)
         for prefix in ('SQL ', 'NOSQL '):
             if left_sql.upper().startswith(prefix):
                 left_sql = left_sql[len(prefix):].strip()
             if right_sql.upper().startswith(prefix):
                 right_sql = right_sql[len(prefix):].strip()
 
-        # Helper to execute a subquery (handles literal SELECTs)
         def execute_subquery(sub_sql: str) -> str:
             sub_upper = sub_sql.upper()
-            # If it's a SELECT without FROM, treat as literal
             if sub_upper.startswith('SELECT') and ' FROM ' not in sub_upper:
                 return self._execute_literal_select(sub_sql)
-            # Otherwise use normal set-operation or SELECT
             if any(kw in sub_upper for kw in ('UNION', 'INTERSECT', 'EXCEPT')):
                 return self._execute_set_operation(sub_sql, depth + 1)
             else:
@@ -1788,13 +1653,7 @@ class SQLDatabase:
 
         return json.dumps(rows, indent=2, default=str)
 
-
-
     def _execute_literal_select(self, sql: str) -> str:
-        """
-        Execute a SELECT without FROM (e.g., SELECT 'Alice' AS name).
-        Returns a JSON string with a single row.
-        """
         sql = sql.strip()
         if not sql.upper().startswith("SELECT"):
             return "Error: Not a SELECT statement"
@@ -1810,7 +1669,6 @@ class SQLDatabase:
             else:
                 expr = part
                 alias = None
-            # Evaluate literal
             if expr.startswith("'") and expr.endswith("'"):
                 val = expr[1:-1]
             elif expr.isdigit():
@@ -1823,32 +1681,21 @@ class SQLDatabase:
             if alias:
                 row[alias] = val
             else:
-                # Use expression as column name (fallback)
                 row[expr] = val
         return json.dumps([row], indent=2)
-        
+
     def _execute_with(self, sql: str, depth: int = 0) -> str:
-        """
-        Execute a WITH (CTE) query.
-        Example: WITH cte AS (SELECT ...) SELECT ...
-        Returns JSON string.
-        """
         import re
         sql = sql.strip()
         if not sql.upper().startswith("WITH"):
             return self._select(sql, depth)
-        
-        # Remove 'WITH '
+
         rest = sql[4:].strip()
-        
-        # Find CTE name and its subquery
         m = re.match(r'(\w+)\s+AS\s*\(', rest, re.IGNORECASE)
         if not m:
             return "Error: Invalid WITH syntax"
         cte_name = m.group(1)
-        start_paren = m.end() - 1   # position of '('
-        
-        # Find matching closing parenthesis
+        start_paren = m.end() - 1
         paren_depth = 1
         i = start_paren + 1
         while i < len(rest) and paren_depth > 0:
@@ -1859,26 +1706,17 @@ class SQLDatabase:
             i += 1
         if paren_depth != 0:
             return "Error: Unmatched parentheses in CTE"
-        
         subquery = rest[start_paren + 1 : i - 1].strip()
         main_query = rest[i:].strip()
-        
-        # Execute the CTE subquery (may itself be a CTE or normal SELECT)
         if subquery.upper().startswith("WITH"):
             sub_rows_str = self._execute_with(subquery, depth + 1)
         else:
             sub_rows_str = self._select(subquery, depth + 1)
-        
         if sub_rows_str.startswith("Error:"):
             return sub_rows_str
-        
         sub_rows = json.loads(sub_rows_str)
-        
-        # Save original table/schema data to restore later
         original_tables = self.storage.data['tables'].copy()
         original_schemas = self.storage.data['schemas'].copy()
-        
-        # Create a fake schema for the CTE
         if sub_rows and len(sub_rows) > 0:
             columns = [
                 {"name": k, "type": "TEXT", "constraints": [], "default": None, "auto_increment": False}
@@ -1886,37 +1724,20 @@ class SQLDatabase:
             ]
         else:
             columns = []
-        
-        # Temporarily inject CTE as a table
         self.storage.data['schemas'][cte_name] = columns
         self.storage.data['tables'][cte_name] = sub_rows
-        
-        # Execute the main query (may contain the CTE name as a table)
         if main_query.upper().startswith("WITH"):
             result_str = self._execute_with(main_query, depth + 1)
         else:
             result_str = self._select(main_query, depth + 1)
-        
-        # Restore original state
         self.storage.data['tables'] = original_tables
         self.storage.data['schemas'] = original_schemas
-        
         return result_str
-    
 
     def _evaluate_exists(self, subquery_sql: str, outer_row: Dict, outer_table: str, depth: int = 0) -> bool:
-        """
-        Evaluate an EXISTS (or NOT EXISTS) subquery for a single outer row.
-        Replaces occurrences of 'outer_table.column' with the literal value from outer_row,
-        then executes the subquery and returns True if it returns at least one row.
-        """
-        # Clone the subquery string
         rewritten = subquery_sql
-        # Replace each outer column reference with its value
         for col_name, col_val in outer_row.items():
-            # Pattern: outer_table.col_name (e.g., users.id)
             pattern = rf'\b{outer_table}\.{col_name}\b'
-            # Convert value to SQL literal
             if col_val is None:
                 replacement = 'NULL'
             elif isinstance(col_val, str):
@@ -1924,7 +1745,6 @@ class SQLDatabase:
             else:
                 replacement = str(col_val)
             rewritten = re.sub(pattern, replacement, rewritten, flags=re.IGNORECASE)
-        # Execute the rewritten subquery
         try:
             result_str = self._select(rewritten, depth + 1)
             if result_str.startswith("Error:"):
