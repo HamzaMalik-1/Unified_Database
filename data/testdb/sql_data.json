@@ -112,6 +112,60 @@
         "constraints": [],
         "default": null
       }
+    ],
+    "books": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "constraints": [
+          "NOT NULL"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "price",
+        "type": "REAL",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      }
+    ],
+    "temp_table": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ],
+        "default": null,
+        "auto_increment": true
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "constraints": [
+          "NOT NULL"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "age",
+        "type": "INT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      }
     ]
   },
   "tables": {
@@ -120,6 +174,11 @@
       {
         "id": 101,
         "price": 150.5,
+        "name": "ali"
+      },
+      {
+        "id": 1,
+        "price": null,
         "name": "ali"
       }
     ],
@@ -131,28 +190,49 @@
         "email": null,
         "in": null,
         "status": null
+      },
+      {
+        "id": 78,
+        "name": "usman",
+        "years": null,
+        "email": null,
+        "in": null,
+        "status": null
+      }
+    ],
+    "books": [],
+    "temp_table": [
+      {
+        "id": 1,
+        "name": "ali",
+        "age": 14
+      },
+      {
+        "id": 2,
+        "name": "usman",
+        "age": 19
       }
     ]
   },
-  "indexes": {
-    "idx_name": {
-      "table": "users",
-      "column": "name",
-      "map": {}
-    }
-  },
+  "indexes": {},
   "foreign_keys": {
     "product": [],
     "order": [],
-    "users": []
+    "users": [],
+    "books": [],
+    "temp_table": []
   },
   "check_constraints": {
     "orders": [],
     "product": [],
     "order": [],
-    "users": []
+    "users": [],
+    "books": [],
+    "temp_table": []
   },
-  "auto_increment": {},
+  "auto_increment": {
+    "temp_table": 2
+  },
   "views": {},
   "procedures": {},
   "triggers": []

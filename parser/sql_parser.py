@@ -184,6 +184,10 @@ class SQLParser:
             if token == 'INNER':
                 join_type = 'INNER'
                 i += 1
+                # Expect next token to be 'JOIN'
+                if i >= len(tokens) or tokens[i].upper() != 'JOIN':
+                    raise ValueError("Expected JOIN after INNER")
+                i += 1
                 if i >= len(tokens):
                     raise ValueError("Missing table after INNER JOIN")
                 join_table = tokens[i]
@@ -196,7 +200,7 @@ class SQLParser:
                     condition_parts.append(tokens[i])
                     i += 1
                 condition = ' '.join(condition_parts)
-                joins.append(('INNER', join_table, condition))
+                joins.append((join_type, join_table, condition))
             elif token == 'LEFT':
                 join_type = 'LEFT'
                 i += 1
@@ -215,7 +219,7 @@ class SQLParser:
                     condition_parts.append(tokens[i])
                     i += 1
                 condition = ' '.join(condition_parts)
-                joins.append(('LEFT', join_table, condition))
+                joins.append((join_type, join_table, condition))
             elif token == 'RIGHT':
                 join_type = 'RIGHT'
                 i += 1
@@ -234,7 +238,7 @@ class SQLParser:
                     condition_parts.append(tokens[i])
                     i += 1
                 condition = ' '.join(condition_parts)
-                joins.append(('RIGHT', join_table, condition))
+                joins.append((join_type, join_table, condition))
             elif token == 'FULL':
                 join_type = 'FULL'
                 i += 1
@@ -253,7 +257,7 @@ class SQLParser:
                     condition_parts.append(tokens[i])
                     i += 1
                 condition = ' '.join(condition_parts)
-                joins.append(('FULL', join_table, condition))
+                joins.append((join_type, join_table, condition))
             elif token == 'NATURAL':
                 i += 1
                 if i >= len(tokens) or tokens[i].upper() != 'JOIN':
@@ -288,7 +292,7 @@ class SQLParser:
                     condition_parts.append(tokens[i])
                     i += 1
                 condition = ' '.join(condition_parts)
-                joins.append(('INNER', join_table, condition))
+                joins.append((join_type, join_table, condition))
             else:
                 raise ValueError(f"Unexpected token in FROM clause: {token}")
 

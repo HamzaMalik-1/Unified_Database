@@ -4,7 +4,7 @@ generators/select_generator.py
 Builds the final SQL / NOSQL SELECT command string from extracted parts.
 Handles: simple select, aggregates, GROUP BY, HAVING, JOINs, sub-queries,
          scalar sub-queries, UNION / INTERSECT / EXCEPT, WITH (CTE), implicit JOINs,
-         "who have" subqueries, explicit IN subqueries, and CONTAINS.
+         "who have" subqueries, explicit IN subqueries, CONTAINS, and "with column value".
 """
 
 from __future__ import annotations
@@ -27,10 +27,12 @@ class SelectGenerator:
     def generate(self, text: str) -> Optional[str]:
         p = self._p
 
-        # ------------------------------------------------------------------
-        #  DIRECT HANDLERS for various patterns
-        # ------------------------------------------------------------------
-        # NEW: Handle CONTAINS queries (must be first)
+        # NEW: Handle "with column value" pattern (e.g., "list users with name ali")
+        direct_result = self._handle_with_condition(text)
+        if direct_result:
+            return direct_result
+
+        # Handle CONTAINS queries
         direct_result = self._handle_contains(text)
         if direct_result:
             return direct_result
@@ -220,6 +222,71 @@ class SelectGenerator:
         return cmd
 
     # ------------------------------------------------------------------
+    #  NEW DIRECT HANDLER for "with column value" pattern
+    #  e.g., "list users with name ali" → SQL SELECT * FROM users WHERE name = 'ali'
+    # ------------------------------------------------------------------
+    def _handle_with_condition(self, text: str) -> Optional[str]:
+        """
+        Handles queries like:
+          - "list users with name ali"
+          - "show products with price 100"
+          - "get customers with email john@example.com"
+        Returns a command with WHERE equality condition.
+        """
+        text_lower = text.lower().strip()
+        # Remove leading command words: list, show, get, find, retrieve
+        for prefix in ("list ", "show ", "get ", "find ", "retrieve "):
+            if text_lower.startswith(prefix):
+                rest = text_lower[len(prefix):].strip()
+                break
+        else:
+            rest = text_lower
+
+        # Pattern: <table> with <column> <value>
+        # Value can be a word, quoted string, or number
+        match = re.match(r'^(\w+)\s+with\s+(\w+)\s+([^\s]+?)(?:\s+and\s+|\s*$)', rest)
+        if not match:
+            # Allow value to be multiple words (like email with dots)
+            match = re.match(r'^(\w+)\s+with\s+(\w+)\s+(.+)$', rest)
+        if not match:
+            return None
+
+        table_candidate = match.group(1)
+        column = match.group(2)
+        value_raw = match.group(3).strip().strip('"\'')
+
+        # Resolve table name (handle singular/plural)
+        known_tables = self._p.get_known_tables()
+        table = None
+        if table_candidate in known_tables:
+            table = table_candidate
+        else:
+            singular = table_candidate.rstrip('s')
+            if singular in known_tables:
+                table = singular
+            elif table_candidate + 's' in known_tables:
+                table = table_candidate + 's'
+
+        if table is None:
+            return None
+
+        # Verify column exists (optional, but good)
+        known_cols = self._p.get_column_names(table)
+        if column not in known_cols:
+            # If column not found, maybe it's a synonym? For now, still proceed but log?
+            # We'll still generate the query but with the given column.
+            pass
+
+        prefix = self._p.get_prefix(table)
+        # Quote the value if it's not a number
+        if value_raw.isdigit():
+            quoted_value = value_raw
+        else:
+            quoted_value = f"'{value_raw}'"
+
+        return f"{prefix} SELECT * FROM {table} WHERE {column} = {quoted_value}"
+
+    # ------------------------------------------------------------------
     #  DIRECT HANDLER for CONTAINS (NoSQL array/string containment)
     # ------------------------------------------------------------------
     def _handle_contains(self, text: str) -> Optional[str]:
@@ -241,8 +308,8 @@ class SelectGenerator:
         else:
             return None
 
-        # Patterns: <table> where <field> contains <value>
-        # or <table> whose <field> contains <value>
+        # Patterns: table where <field> contains <value>
+        # or table whose <field> contains <value>
         match = re.match(r'^(\w+)\s+(?:where|whose)\s+(\w+)\s+contains\s+[\'"]?([^\'"]+)[\'"]?$', rest)
         if not match:
             # Also allow "contains" without quotes around value
@@ -516,7 +583,7 @@ class SelectGenerator:
         else:
             rest = text_lower
 
-        # Pattern: count [of] <td> by <column>
+        # Pattern: count [of] table by <column>
         # Match optional "of"
         match = re.match(r'^count\s+(?:of\s+)?(\w+)\s+by\s+(\w+)(?:\s+having\s+count\s*>\s*(\d+))?$', rest)
         if not match:

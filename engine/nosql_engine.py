@@ -43,7 +43,7 @@ class NoSQLDatabase:
                             return ResponseFactory.json(data, message="Query executed successfully")
                         else:
                             if data and all(isinstance(item, dict) for item in data):
-                                return ResponseFactory.table(data, message="Query executed successfully")
+                                return ResponseFactory.json(data, message="Query executed successfully")
                             else:
                                 return ResponseFactory.json(data, message="Query executed successfully")
                     else:

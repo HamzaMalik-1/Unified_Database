@@ -1,0 +1,427 @@
+{
+  "schemas": {
+    "departments": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ],
+        "default": null,
+        "auto_increment": true
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "constraints": [
+          "NOT NULL"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "budget",
+        "type": "REAL",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      }
+    ],
+    "employees": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ],
+        "default": null,
+        "auto_increment": true
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "constraints": [
+          "NOT NULL"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "salary",
+        "type": "REAL",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "department_id",
+        "type": "INT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "hire_date",
+        "type": "TEXT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "is_active",
+        "type": "BOOLEAN",
+        "constraints": [],
+        "default": "TRUE",
+        "auto_increment": false
+      }
+    ],
+    "projects": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ],
+        "default": null,
+        "auto_increment": true
+      },
+      {
+        "name": "title",
+        "type": "TEXT",
+        "constraints": [
+          "NOT NULL"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "budget",
+        "type": "REAL",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "lead_employee_id",
+        "type": "INT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      }
+    ],
+    "assignments": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ],
+        "default": null,
+        "auto_increment": true
+      },
+      {
+        "name": "employee_id",
+        "type": "INT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "project_id",
+        "type": "INT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "hours",
+        "type": "REAL",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      }
+    ],
+    "salaries": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ],
+        "default": null,
+        "auto_increment": true
+      },
+      {
+        "name": "employee_id",
+        "type": "INT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "amount",
+        "type": "REAL",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "effective_date",
+        "type": "TEXT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      }
+    ]
+  },
+  "tables": {
+    "departments": [
+      {
+        "id": 1,
+        "name": "Engineering",
+        "budget": 500000
+      },
+      {
+        "id": 2,
+        "name": "Sales",
+        "budget": 300000
+      },
+      {
+        "id": 3,
+        "name": "HR",
+        "budget": 150000
+      }
+    ],
+    "employees": [
+      {
+        "id": 1,
+        "name": "Alice Johnson",
+        "salary": 7500,
+        "department_id": 1,
+        "hire_date": "2023-01-15",
+        "is_active": 1
+      },
+      {
+        "id": 2,
+        "name": "Bob Smith",
+        "salary": 6800,
+        "department_id": 1,
+        "hire_date": "2023-03-20",
+        "is_active": 1
+      },
+      {
+        "id": 3,
+        "name": "Charlie Lee",
+        "salary": 6200,
+        "department_id": 2,
+        "hire_date": "2023-02-10",
+        "is_active": 1
+      },
+      {
+        "id": 4,
+        "name": "Diana Prince",
+        "salary": 7100,
+        "department_id": 2,
+        "hire_date": "2023-04-05",
+        "is_active": 1
+      },
+      {
+        "id": 5,
+        "name": "Eve Adams",
+        "salary": 5500,
+        "department_id": 3,
+        "hire_date": "2023-05-12",
+        "is_active": 0
+      }
+    ],
+    "projects": [
+      {
+        "id": 1,
+        "title": "Mobile App",
+        "budget": 120000,
+        "lead_employee_id": 1
+      },
+      {
+        "id": 2,
+        "title": "Cloud Migration",
+        "budget": 200000,
+        "lead_employee_id": 2
+      },
+      {
+        "id": 3,
+        "title": "Sales Dashboard",
+        "budget": 80000,
+        "lead_employee_id": 3
+      }
+    ],
+    "assignments": [
+      {
+        "id": 1,
+        "employee_id": 1,
+        "project_id": 1,
+        "hours": 40
+      },
+      {
+        "id": 2,
+        "employee_id": 2,
+        "project_id": 1,
+        "hours": 30
+      },
+      {
+        "id": 3,
+        "employee_id": 2,
+        "project_id": 2,
+        "hours": 20
+      },
+      {
+        "id": 4,
+        "employee_id": 3,
+        "project_id": 3,
+        "hours": 35
+      },
+      {
+        "id": 5,
+        "employee_id": 4,
+        "project_id": 3,
+        "hours": 25
+      }
+    ],
+    "salaries": [
+      {
+        "id": 1,
+        "employee_id": 1,
+        "amount": 7500,
+        "effective_date": "2023-01-15"
+      },
+      {
+        "id": 2,
+        "employee_id": 1,
+        "amount": 8000,
+        "effective_date": "2024-01-01"
+      },
+      {
+        "id": 3,
+        "employee_id": 2,
+        "amount": 6800,
+        "effective_date": "2023-03-20"
+      },
+      {
+        "id": 4,
+        "employee_id": 2,
+        "amount": 7200,
+        "effective_date": "2024-01-01"
+      }
+    ]
+  },
+  "indexes": {
+    "idx_employee_name": {
+      "table": "employees",
+      "column": "name",
+      "map": {
+        "Alice Johnson": [
+          0
+        ],
+        "Bob Smith": [
+          1
+        ],
+        "Charlie Lee": [
+          2
+        ],
+        "Diana Prince": [
+          3
+        ],
+        "Eve Adams": [
+          4
+        ]
+      }
+    }
+  },
+  "foreign_keys": {
+    "employees": [
+      {
+        "column": "department_id",
+        "ref_table": "departments",
+        "ref_column": "id",
+        "on_delete": "RESTRICT",
+        "on_update": "RESTRICT"
+      }
+    ],
+    "projects": [
+      {
+        "column": "lead_employee_id",
+        "ref_table": "employees",
+        "ref_column": "id",
+        "on_delete": "SET NULL",
+        "on_update": "RESTRICT"
+      }
+    ],
+    "assignments": [
+      {
+        "column": "employee_id",
+        "ref_table": "employees",
+        "ref_column": "id",
+        "on_delete": "CASCADE",
+        "on_update": "RESTRICT"
+      },
+      {
+        "column": "project_id",
+        "ref_table": "projects",
+        "ref_column": "id",
+        "on_delete": "CASCADE",
+        "on_update": "RESTRICT"
+      }
+    ],
+    "salaries": [
+      {
+        "column": "employee_id",
+        "ref_table": "employees",
+        "ref_column": "id",
+        "on_delete": "CASCADE",
+        "on_update": "RESTRICT"
+      }
+    ]
+  },
+  "check_constraints": {
+    "employees": [
+      "salary >= 0"
+    ],
+    "projects": [
+      "budget >= 0"
+    ]
+  },
+  "auto_increment": {
+    "departments": 3,
+    "employees": 5,
+    "projects": 3,
+    "assignments": 5,
+    "salaries": 4
+  },
+  "views": {
+    "active_employees": "SQL SELECT * FROM employees WHERE is_active = 1",
+    "department_summary": "SQL SELECT d.name, COUNT(e.id) AS employee_count, SUM(e.salary) AS total_salary FROM departments d LEFT JOIN employees e ON d.id = e.department_id GROUP BY d.id"
+  },
+  "procedures": {
+    "get_employee_by_id": {
+      "params": [
+        "eid"
+      ],
+      "body": "SELECT * FROM employees WHERE id = $1"
+    },
+    "raise_salary": {
+      "params": [
+        "eid",
+        "percentage"
+      ],
+      "body": "UPDATE employees SET salary = salary * (1 + $2/100) WHERE id = $1"
+    }
+  },
+  "triggers": [
+    {
+      "name": "log_salary_update",
+      "timing": "AFTER",
+      "event": "UPDATE",
+      "table": "salaries",
+      "statement": "INSERT INTO audit (msg) VALUES ('Salary changed for employee ' || NEW.employee_id || ' to ' || NEW.amount)"
+    }
+  ]
+}

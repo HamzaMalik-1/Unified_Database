@@ -1,0 +1,50 @@
+{
+  "schemas": {
+    "products": [
+      {
+        "name": "id",
+        "type": "PRIMARY",
+        "constraints": [
+          "KEY"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "amount",
+        "type": "INT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "user_id",
+        "type": "INT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      }
+    ]
+  },
+  "tables": {
+    "products": []
+  },
+  "indexes": {},
+  "foreign_keys": {
+    "products": []
+  },
+  "check_constraints": {
+    "products": []
+  },
+  "auto_increment": {},
+  "views": {},
+  "procedures": {},
+  "triggers": []
+}

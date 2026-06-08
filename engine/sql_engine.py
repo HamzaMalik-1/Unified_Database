@@ -282,6 +282,7 @@ class SQLDatabase:
         except Exception as e:
             logger.error(f"INSERT failed: {e}")
             return f"Error: {e}"
+
     def _get_nested(self, doc: Dict, path: str) -> Any:
         """Retrieve a value from a document using dot notation.
         For SQL engine, we only need top‑level keys, but this method
@@ -290,7 +291,7 @@ class SQLDatabase:
         # If the path contains a dot, treat as top‑level key? In SQL we don't need nested.
         # For simplicity, just return the top‑level value.
         return doc.get(path, None)
-           
+
     def _evaluate_condition(self, row: Dict, condition_str: str) -> bool:
         """
         Evaluate a WHERE condition for a single row (SQL engine).
@@ -308,85 +309,6 @@ class SQLDatabase:
         except Exception as e:
             logger.error(f"Condition evaluation failed: {cond} -> {e}")
             return False
-
-    # def _evaluate_condition(self, doc: Dict, condition_str: str) -> bool:
-    #     if not condition_str:
-    #         return True
-
-    #     cond = condition_str.strip()
-
-    #     # ----- CONTAINS operator (whole word matching, case‑insensitive) -----
-    #     contains_match = re.match(r'^([\w.]+)\s+CONTAINS\s+(.+)$', cond, re.IGNORECASE)
-    #     if contains_match:
-    #         field = contains_match.group(1).strip()
-    #         right_raw = contains_match.group(2).strip()
-    #         # Extract the search word (strip quotes if present)
-    #         if right_raw.startswith("'") and right_raw.endswith("'"):
-    #             search_word = right_raw[1:-1]
-    #         else:
-    #             search_word = right_raw
-
-    #         left_val = self._get_nested(doc, field)
-    #         if left_val is None:
-    #             return False
-
-    #         # Escape regex special characters and match whole word, case‑insensitive
-    #         escaped_word = re.escape(search_word)
-    #         word_pattern = re.compile(rf'\b{escaped_word}\b', re.IGNORECASE)
-
-    #         if isinstance(left_val, list):
-    #             for item in left_val:
-    #                 if isinstance(item, str):
-    #                     if word_pattern.search(item):
-    #                         return True
-    #                 elif item == search_word:   # non‑string exact match
-    #                     return True
-    #             return False
-    #         elif isinstance(left_val, str):
-    #             return bool(word_pattern.search(left_val))
-    #         else:
-    #             # Non‑string values: only exact match
-    #             return left_val == search_word
-
-    #     # ----- Standard comparison operators -----
-    #     match = re.match(r'^([\w.]+)\s*([=<>!]+)\s*(.+)$', cond)
-    #     if not match:
-    #         return False
-
-    #     field = match.group(1).strip()
-    #     operator = match.group(2).strip()
-    #     right_raw = match.group(3).strip()
-
-    #     # Parse the right‑hand value (string, number, or null)
-    #     if right_raw.startswith("'") and right_raw.endswith("'"):
-    #         right_val = right_raw[1:-1]
-    #     elif right_raw.upper() == "NULL":
-    #         right_val = None
-    #     elif right_raw.isdigit():
-    #         right_val = int(right_raw)
-    #     else:
-    #         try:
-    #             right_val = float(right_raw)
-    #         except:
-    #             right_val = right_raw
-
-    #     left_val = self._get_nested(doc, field)
-
-    #     # Apply operator
-    #     if operator == "=" or operator == "==":
-    #         return left_val == right_val
-    #     elif operator == "!=":
-    #         return left_val != right_val
-    #     elif operator == ">":
-    #         return left_val > right_val
-    #     elif operator == "<":
-    #         return left_val < right_val
-    #     elif operator == ">=":
-    #         return left_val >= right_val
-    #     elif operator == "<=":
-    #         return left_val <= right_val
-    #     else:
-    #         return False
 
     def _apply_aggregates(self, rows: List[Dict], group_col: str, agg_specs: Dict[str, str]) -> List[Dict]:
         groups = {}
@@ -968,22 +890,91 @@ class SQLDatabase:
         row = rows[0]
         return list(row.values())[0] if row else None
 
-    def _evaluate_join_condition(self, row1: Dict, row2: Dict, condition: str, alias1: str = None, alias2: str = None) -> bool:
+    def _evaluate_join_condition(self, row1: Dict, row2: Dict, condition: str,
+                                  alias1: str = None, alias2: str = None) -> bool:
+        """
+        Evaluate a JOIN ON condition for a pair of rows.
+
+        Strategy:
+          1. Extract all "table.column" references from the condition string itself.
+          2. Determine which table name maps to row1 vs row2 by checking which
+             referenced columns exist in each row's keys.
+          3. Substitute qualified references (table.column → value) first.
+          4. Substitute any remaining unqualified references, sorting by column
+             name length descending to prevent partial matches (e.g. department_id
+             must be replaced before id).
+          5. Fix single '=' → '==' and eval.
+        """
         if not condition:
             return True
+
         cond = condition
-        for col_name, col_val in row1.items():
-            cond = re.sub(rf'\b{col_name}\b', repr(col_val), cond)
-            if alias1:
-                cond = re.sub(rf'\b{alias1}\.{col_name}\b', repr(col_val), cond)
-        for col_name, col_val in row2.items():
-            cond = re.sub(rf'\b{col_name}\b', repr(col_val), cond)
-            if alias2:
-                cond = re.sub(rf'\b{alias2}\.{col_name}\b', repr(col_val), cond)
-        cond = re.sub(r'(?<![<>!=])=(?![=])', '==', cond)
+
+        # Step 1: Extract all "word.word" qualified references from the condition
+        qualified_refs = re.findall(r'\b(\w+)\.(\w+)\b', cond)
+
+        if qualified_refs:
+            # Unique table names mentioned, preserving first-seen order
+            table_names = list(dict.fromkeys(t for t, c in qualified_refs))
+
+            row1_keys = set(row1.keys())
+            row2_keys = set(row2.keys())
+
+            row1_table = None
+            row2_table = None
+
+            for tname in table_names:
+                cols_for_table = [c for t, c in qualified_refs if t == tname]
+                row1_matches = sum(1 for c in cols_for_table if c in row1_keys)
+                row2_matches = sum(1 for c in cols_for_table if c in row2_keys)
+
+                if row1_matches >= row2_matches:
+                    if row1_table is None:
+                        row1_table = tname
+                    elif row2_table is None:
+                        row2_table = tname
+                else:
+                    if row2_table is None:
+                        row2_table = tname
+                    elif row1_table is None:
+                        row1_table = tname
+
+            # Fallback to aliases if detection failed
+            row1_table = row1_table or alias1
+            row2_table = row2_table or alias2
+
+            # Step 2: Replace qualified "table.column" → repr(value)
+            # Sort by column name length descending to avoid partial replacements
+            if row1_table:
+                for col_name, col_val in sorted(row1.items(), key=lambda x: len(x[0]), reverse=True):
+                    cond = re.sub(
+                        rf'\b{re.escape(row1_table)}\.{re.escape(col_name)}\b',
+                        repr(col_val), cond
+                    )
+
+            if row2_table:
+                for col_name, col_val in sorted(row2.items(), key=lambda x: len(x[0]), reverse=True):
+                    cond = re.sub(
+                        rf'\b{re.escape(row2_table)}\.{re.escape(col_name)}\b',
+                        repr(col_val), cond
+                    )
+
+        # Step 3: Replace any remaining unqualified column references
+        # Negative lookbehind (?<![\w.]) ensures we don't re-match inside already-substituted values
+        # Sort longest first: department_id before id
+        for col_name, col_val in sorted(row1.items(), key=lambda x: len(x[0]), reverse=True):
+            cond = re.sub(rf'(?<![\w.]){re.escape(col_name)}\b', repr(col_val), cond)
+
+        for col_name, col_val in sorted(row2.items(), key=lambda x: len(x[0]), reverse=True):
+            cond = re.sub(rf'(?<![\w.]){re.escape(col_name)}\b', repr(col_val), cond)
+
+        # Step 4: Fix single = to ==
+        cond = re.sub(r'(?<![<>!=])=(?!=)', '==', cond)
+
         try:
-            return eval(cond, {"__builtins__": {}})
-        except:
+            return bool(eval(cond, {"__builtins__": {}}))
+        except Exception as e:
+            logger.error(f"JOIN eval failed: '{cond}' → {e}")
             return False
 
     def _join_rows(self, left_rows: List[Dict], right_rows: List[Dict], join_type: str, condition: str, left_alias: str = None, right_alias: str = None) -> List[Dict]:
@@ -1487,11 +1478,8 @@ class SQLDatabase:
             return f"Error: {e}"
 
     def _fire_triggers(self, table: str, timing: str, event: str, old_row: Dict = None, new_row: Dict = None):
-        print(f"🔥 Checking triggers for {table} {timing} {event}")
         for trigger in self.storage.data['triggers']:
-            print(f"   Trigger: {trigger['name']} on {trigger['table']} {trigger['timing']} {trigger['event']}")
             if trigger['table'] == table and trigger['timing'] == timing and trigger['event'] == event:
-                print(f"   ✅ Firing {trigger['name']}")
                 self._execute_trigger(trigger, old_row, new_row)
 
     def _execute_trigger(self, trigger_def: dict, old_row: dict = None, new_row: dict = None):

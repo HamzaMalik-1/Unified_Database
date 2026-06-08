@@ -1,0 +1,159 @@
+{
+  "schemas": {},
+  "tables": {},
+  "collections": {
+    "employee_reviews": [
+      {
+        "employee_id": 1,
+        "review_date": "2025-06-01",
+        "reviewer": "manager",
+        "ratings": {
+          "communication": 4.5,
+          "technical_skills": 5.0,
+          "teamwork": 4.0
+        },
+        "comments": "Excellent performance on project X."
+      },
+      {
+        "employee_id": 2,
+        "review_date": "2025-05-15",
+        "reviewer": "manager",
+        "ratings": {
+          "communication": 3.8,
+          "technical_skills": 4.2,
+          "teamwork": 4.5
+        },
+        "comments": "Good, but needs more communication."
+      },
+      {
+        "employee_id": 3,
+        "review_date": "2025-06-10",
+        "reviewer": "lead",
+        "ratings": {
+          "communication": 4.0,
+          "technical_skills": 3.5,
+          "teamwork": 4.8
+        },
+        "comments": "Strong team player."
+      }
+    ],
+    "activity_log": [
+      {
+        "employee_id": 1,
+        "activities": [
+          "logged_in",
+          "ran_query",
+          "exported_report"
+        ]
+      },
+      {
+        "employee_id": 2,
+        "activities": [
+          "logged_in",
+          "updated_profile"
+        ]
+      },
+      {
+        "employee_id": 3,
+        "activities": [
+          "logged_in",
+          "created_project",
+          "assigned_task"
+        ]
+      }
+    ],
+    "documents": [
+      {
+        "id": 101,
+        "title": "Annual Report",
+        "content": "The company exceeded revenue targets in Q2."
+      },
+      {
+        "id": 102,
+        "title": "Tech Review",
+        "content": "New database engine supports full-text search."
+      },
+      {
+        "id": 103,
+        "title": "Employee Handbook",
+        "content": "All employees must follow security guidelines."
+      }
+    ]
+  },
+  "nosql_indexes": {
+    "idx_rating_communication": {
+      "collection": "employee_reviews",
+      "field": "ratings.communication",
+      "map": {
+        "4.5": [
+          0
+        ],
+        "3.8": [
+          1
+        ],
+        "4.0": [
+          2
+        ]
+      }
+    }
+  },
+  "text_indexes": {
+    "idx_doc_content": {
+      "collection": "documents",
+      "field": "content",
+      "inverted": {
+        "company": [
+          0
+        ],
+        "exceeded": [
+          0
+        ],
+        "revenue": [
+          0
+        ],
+        "targets": [
+          0
+        ],
+        "new": [
+          1
+        ],
+        "database": [
+          1
+        ],
+        "engine": [
+          1
+        ],
+        "supports": [
+          1
+        ],
+        "full": [
+          1
+        ],
+        "text": [
+          1
+        ],
+        "search": [
+          1
+        ],
+        "all": [
+          2
+        ],
+        "employees": [
+          2
+        ],
+        "must": [
+          2
+        ],
+        "follow": [
+          2
+        ],
+        "security": [
+          2
+        ],
+        "guidelines": [
+          2
+        ]
+      }
+    }
+  }
+}

@@ -91,7 +91,7 @@ class DDLGenerator:
         def infer_column_def(col: str) -> str:
             col_lower = col.lower()
             if col_lower == 'id' or col_lower.endswith('_id'):
-                return f"{col} INT PRIMARY KEY"
+                return f"{col} SERIAL PRIMARY KEY"
             if col_lower in ('age', 'quantity', 'count', 'stock', 'year', 'month', 'day', 'rating', 'score'):
                 return f"{col} INT"
             if col_lower in ('price', 'amount', 'total', 'cost', 'revenue', 'balance', 'rate', 'tax'):
