@@ -20,8 +20,9 @@ Processing pipeline
   process(text)
     │
     ├─ 1. pre-process (lowercase, strip)
-    ├─ 2. rule-based  →  intent classify  →  dispatch to correct generator
-    └─ 3. LLM fallback (Ollama) if rule-based returns None
+    ├─ 2. fine‑tuned model (zero‑shot)   → fast, learned patterns
+    ├─ 3. rule‑based                    → fast, deterministic fallback
+    └─ 4. few‑shot LLM (Ollama)         → slow, flexible fallback
 
 Public API (backwards-compatible with the original NLPProcessor)
 ────────────────────────────────────────────────────────────────
@@ -39,7 +40,7 @@ import random
 import json
 from pathlib import Path
 import sys
-from .constants import COLUMN_SYNONYMS,EXPLAIN_MODEL, OLLAMA_MODEL, OLLAMA_URL, OLLAMA_TIMEOUT
+from .constants import COLUMN_SYNONYMS, EXPLAIN_MODEL, OLLAMA_MODEL, OLLAMA_URL, OLLAMA_TIMEOUT
 from .pipeline.intent_classifier import (
     IntentClassifier,
     SELECT, INSERT, UPDATE, DELETE,
@@ -86,17 +87,86 @@ class NLPProcessor:
     # ══════════════════════════════════════════════════════════════════════
 
     def process(self, text: str) -> Optional[str]:
-        """
-        Convert a natural-language query to an engine command string.
-
-        Returns a command string (e.g. ``"SQL SELECT * FROM users"``)
-        or ``None`` if the query could not be understood.
-        """
         normalised = self._normalise(text)
-        command = self._rule_based(normalised)
-        if command:
-            return command
-        return self._llm_fallback(text)  # LLM gets original casing
+        is_short = len(text) <= 35   # treat sentences of 20 characters or fewer as "short"
+        
+        if is_short:
+            # Short sentences: rule‑based first (fast, deterministic)
+            command = self._rule_based(normalised)
+            if command:
+                return command
+            
+            command = self._call_finetuned_model(normalised)
+            if command and self._validate_command(command):
+                return command
+            
+            return self._llm_fallback(text)
+        
+        else:
+            # Long sentences: fine‑tuned model first (better understanding)
+            command = self._call_finetuned_model(normalised)
+            if command and self._validate_command(command):
+                return command
+            
+            command = self._rule_based(normalised)
+            if command:
+                return command
+            
+            return self._llm_fallback(text)
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  Fine‑tuned model (zero‑shot)
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _call_finetuned_model(self, text: str) -> Optional[str]:
+        schema = self._get_current_schema_as_string()
+        prompt = f"<|user|>\n### Schema: {schema}\n### Question: {text}\n<|assistant|>\n"
+        try:
+            with httpx.Client(timeout=OLLAMA_TIMEOUT) as client:
+                response = client.post(
+                    OLLAMA_URL,
+                    json={
+                        "model": OLLAMA_MODEL,
+                        "prompt": prompt,
+                        "stream": False,
+                        "options": {
+                            "temperature": 0.0,
+                            "num_predict": 150,
+                            "stop": ["<|user|>", "\n<|", "</s>"]   # stop before next user turn
+                        }
+                    }
+                )
+                response.raise_for_status()
+                raw = response.json().get("response", "").strip()
+                # The model may output just the command (as in training) without prefix.
+                # Your training outputs include the prefix (e.g., "SQL SELECT ...").
+                # If the model sometimes omits the prefix, add it back here.
+                for line in raw.split('\n'):
+                    line = line.strip().rstrip(';')
+                    if not line:
+                        continue
+                    if line.upper().startswith(("SQL ", "NOSQL ")):
+                        return line
+                    if line.upper().startswith(("SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "WITH", "CALL")):
+                        prefix = "NOSQL" if re.search(r'\b(CONTAINS|PUSH|PULL|ADDTOSET)\b', line, re.IGNORECASE) else "SQL"
+                        return f"{prefix} {line}"
+                return None
+        except Exception as e:
+            print(f"[FineTuned] Error: {e}", file=sys.stderr)
+            return None
+
+    def _validate_command(self, command: str) -> bool:
+        """Basic syntax validation for a generated command."""
+        if not command:
+            return False
+        upper = command.upper().strip()
+        # Must start with SQL or NOSQL
+        if not (upper.startswith("SQL ") or upper.startswith("NOSQL ")):
+            return False
+        # Must contain a recognised verb after the prefix
+        rest = upper[4:].strip() if upper.startswith("SQL ") else upper[6:].strip()
+        verbs = ("SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "WITH", "CALL")
+        return any(rest.startswith(v) for v in verbs)
 
     # ══════════════════════════════════════════════════════════════════════
     #  Rule-based pipeline

@@ -35,6 +35,13 @@
           "teamwork": 4.8
         },
         "comments": "Strong team player."
+      },
+      {
+        "`employee_id`": 2,
+        "`ratings`": {
+          "communication": 4.0
+        },
+        "`comment`": "Great Team Player"
       }
     ],
     "activity_log": [
