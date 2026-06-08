@@ -58,22 +58,54 @@
         "default": null,
         "auto_increment": false
       }
+    ],
+    "books": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ],
+        "default": null,
+        "auto_increment": true
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "constraints": [
+          "NOT NULL"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "price",
+        "type": "REAL",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      }
     ]
   },
   "tables": {
     "orders": [],
-    "product": []
+    "product": [],
+    "books": []
   },
   "indexes": {},
   "foreign_keys": {
     "orders": [],
-    "product": []
+    "product": [],
+    "books": []
   },
   "check_constraints": {
     "orders": [],
-    "product": []
+    "product": [],
+    "books": []
   },
-  "auto_increment": {},
+  "auto_increment": {
+    "books": 0
+  },
   "views": {},
   "procedures": {},
   "triggers": []

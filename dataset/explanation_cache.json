@@ -11,5 +11,8 @@
   "5891dbd59f5fcbf9ed17c9475482a903": "This command retrieves all columns of data from the 'users' table within a database system.",
   "013aae4a33e3873d3b6dec60abfe4799": "This command retrieves all columns for every record found within the 'user' table of a database.",
   "13ec6ffa39c440279618638731d8cfe9": "Retrieve all columns for the user record with a specific ID.",
-  "498a2acd036a16a234de3d5cc825edc7": "The command retrieves all columns for every record found within the 'us' table in a database system that uses SQL syntax."
+  "498a2acd036a16a234de3d5cc825edc7": "The command retrieves all columns for every record found within the 'us' table in a database system that uses SQL syntax.",
+  "e2b899c15f24318eb63253fb01f9276b": "This command retrieves all records from the 'employees' table where their ID matches those listed in a subquery that selects IDs of active reviewers for each employee.",
+  "e551305bed827ec5c9fd3c9593d82bfd": "This command retrieves all columns from the 'employees' table and combines them with corresponding column data in the 'salaries' table where each employee has a matching ID, showing both their details and current pay information together.",
+  "6412e558f8a0e93ce4c53ee2b4ebea11": "Retrieve all entries from the collection named \"documents\" where the document titled 'Annual Report' is present."
 }

@@ -5,5 +5,7 @@
   "81bfdc6a26be993b1605679a3b1b0a9a": "SQL CREATE TABLE products (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255), amount INT)",
   "d9c3641ab1b4b37947dd2c2a73242e69": "SQL SELECT * FROM product",
   "de9368a25ad17d4763603f25333f7427": "SQL SELECT * FROM product INNER JOIN order ON product.id = order.product_id WHERE NOT EXISTS (SELECT 1 FROM temp_table tt WHERE tt.id = product.id) AND product.categories IN ('Books') ORDER BY price ASC; -- Assuming 'temp_table' should not be joined and we want to filter products in the category of Books",
-  "b72b40ad195aa94e8dad73e54615ed2a": "SQL INSERT INTO temp_table (id, name, age) VALUES ('2', 'sana', 15) -- Assuming the ID must be unique and incremented by one from a previous entry if necessary."
+  "b72b40ad195aa94e8dad73e54615ed2a": "SQL INSERT INTO temp_table (id, name, age) VALUES ('2', 'sana', 15) -- Assuming the ID must be unique and incremented by one from a previous entry if necessary.",
+  "674575fc8dcdcae5a97391c734f0a69a": "SQL SELECT * FROM employees WHERE is_active = 1",
+  "3e3a103b4dc11bf651666323c06bb198": "SQL SELECT * FROM employees WHERE is_active = TRUE; -- Assuming the intent was to select active employees. If a specific column or condition were needed instead of '*', it should be specified accordingly."
 }

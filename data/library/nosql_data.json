@@ -1,7 +1,9 @@
 {
   "schemas": {},
   "tables": {},
-  "collections": {},
+  "collections": {
+    "logs": []
+  },
   "nosql_indexes": {},
   "text_indexes": {}
 }

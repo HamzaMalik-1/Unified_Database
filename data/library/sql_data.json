@@ -1,0 +1,53 @@
+{
+  "schemas": {
+    "book": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ],
+        "default": null,
+        "auto_increment": true
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "constraints": [
+          "NOT NULL"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "price",
+        "type": "REAL",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      }
+    ]
+  },
+  "tables": {
+    "book": [
+      {
+        "id": 1,
+        "name": "atomic_habit",
+        "price": 200.0
+      }
+    ]
+  },
+  "indexes": {},
+  "foreign_keys": {
+    "book": []
+  },
+  "check_constraints": {
+    "book": []
+  },
+  "auto_increment": {
+    "book": 1
+  },
+  "views": {},
+  "procedures": {},
+  "triggers": []
+}

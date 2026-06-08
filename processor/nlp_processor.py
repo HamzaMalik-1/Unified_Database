@@ -88,7 +88,8 @@ class NLPProcessor:
 
     def process(self, text: str) -> Optional[str]:
         normalised = self._normalise(text)
-        is_short = len(text) <= 35   # treat sentences of 20 characters or fewer as "short"
+        is_short = len(text) <= 30     # treat sentences of 20 characters or fewer as "short"
+        # is_short = len(text) <= 75     # treat sentences of 20 characters or fewer as "short"
         
         if is_short:
             # Short sentences: rule‑based first (fast, deterministic)
@@ -121,6 +122,14 @@ class NLPProcessor:
     def _call_finetuned_model(self, text: str) -> Optional[str]:
         schema = self._get_current_schema_as_string()
         prompt = f"<|user|>\n### Schema: {schema}\n### Question: {text}\n<|assistant|>\n"
+        
+        # ── DEBUG: Print the exact prompt ─────────────────────────────────────
+        print("\n" + "="*80)
+        print("[FineTuned] Sending prompt to model:")
+        print("-"*80)
+        print(prompt)
+        print("-"*80)
+        
         try:
             with httpx.Client(timeout=OLLAMA_TIMEOUT) as client:
                 response = client.post(
@@ -132,28 +141,111 @@ class NLPProcessor:
                         "options": {
                             "temperature": 0.0,
                             "num_predict": 150,
-                            "stop": ["<|user|>", "\n<|", "</s>"]   # stop before next user turn
+                            "stop": ["<|user|>", "\n<|", "</s>"]
                         }
                     }
                 )
                 response.raise_for_status()
                 raw = response.json().get("response", "").strip()
-                # The model may output just the command (as in training) without prefix.
-                # Your training outputs include the prefix (e.g., "SQL SELECT ...").
-                # If the model sometimes omits the prefix, add it back here.
-                for line in raw.split('\n'):
-                    line = line.strip().rstrip(';')
-                    if not line:
-                        continue
-                    if line.upper().startswith(("SQL ", "NOSQL ")):
-                        return line
-                    if line.upper().startswith(("SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "WITH", "CALL")):
-                        prefix = "NOSQL" if re.search(r'\b(CONTAINS|PUSH|PULL|ADDTOSET)\b', line, re.IGNORECASE) else "SQL"
-                        return f"{prefix} {line}"
-                return None
+                
+                # ── DEBUG: Print raw model output ─────────────────────────────
+                print("[FineTuned] Raw model output:")
+                print("-"*80)
+                print(raw)
+                print("-"*80)
+                
+                # ── Extract full command (supports multi-line and markdown) ────
+                command = self._extract_command_from_output(raw)
+                
+                if command:
+                    print(f"[FineTuned] Extracted command: {command}")
+                    print("="*80 + "\n")
+                    return command
+                else:
+                    print("[FineTuned] No valid command extracted from output")
+                    print("="*80 + "\n")
+                    return None
+                    
         except Exception as e:
             print(f"[FineTuned] Error: {e}", file=sys.stderr)
+            print("="*80 + "\n")
             return None
+
+    def _extract_command_from_output(self, raw: str) -> Optional[str]:
+        """
+        Extract a complete SQL/NoSQL command from raw model output,
+        handling multi-line statements, markdown code blocks, and extra prose.
+        """
+        if not raw:
+            return None
+        
+        # Remove markdown code fences (```sql ... ``` or ``` ... ```)
+        # Also remove any surrounding triple backticks.
+        import re
+        cleaned = re.sub(r'^```(?:sql|nosql)?\s*\n?', '', raw, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\n?```$', '', cleaned)
+        
+        lines = cleaned.split('\n')
+        command_parts = []
+        in_command = False
+        semicolon_seen = False
+        
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                # Empty line: if we are already collecting, stop (end of command)
+                if in_command:
+                    break
+                continue
+            
+            upper = stripped.upper()
+            
+            # Start of command detection
+            if not in_command:
+                if upper.startswith(("SQL ", "NOSQL ")):
+                    command_parts.append(stripped)
+                    in_command = True
+                elif upper.startswith(("SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "WITH", "CALL")):
+                    prefix = "NOSQL" if re.search(r'\b(CONTAINS|PUSH|PULL|ADDTOSET)\b', stripped, re.IGNORECASE) else "SQL"
+                    command_parts.append(f"{prefix} {stripped}")
+                    in_command = True
+                else:
+                    # Not a command line – skip until we find one
+                    continue
+            else:
+                # Already collecting command lines
+                # Stop if we encounter a line that looks like prose (common English words)
+                if re.search(r'\b(example|note|this|the|to|for|and|will|update|set|where|values|insert|delete|create|alter|drop|select|from|join)\b', upper):
+                    # But if the line still looks like SQL continuation (e.g., starts with SET, WHERE, etc.), keep it
+                    if re.match(r'^(SET|WHERE|GROUP BY|ORDER BY|HAVING|LIMIT|OFFSET|JOIN|ON|AND|OR|VALUES|INTO|FROM)', upper):
+                        command_parts.append(stripped)
+                    else:
+                        # Likely prose – stop collecting
+                        break
+                else:
+                    command_parts.append(stripped)
+                
+                # If the line ends with a semicolon, we have a complete statement
+                if stripped.endswith(';'):
+                    semicolon_seen = True
+                    break
+        
+        if not command_parts:
+            # Fallback: try to extract using simple regex
+            # Look for pattern: (SQL|NOSQL) ... ;
+            match = re.search(r'(SQL|NOSQL)\s+.*?;', cleaned, re.DOTALL | re.IGNORECASE)
+            if match:
+                return match.group(0).rstrip(';')
+            return None
+        
+        # Join parts with space (or newline? We'll use space for consistency)
+        full_command = ' '.join(command_parts).rstrip(';')
+        
+        # Ensure it starts with SQL or NOSQL (it should already)
+        if not full_command.upper().startswith(("SQL ", "NOSQL ")):
+            return None
+        
+        return full_command
 
     def _validate_command(self, command: str) -> bool:
         """Basic syntax validation for a generated command."""

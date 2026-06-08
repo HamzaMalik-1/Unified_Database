@@ -54,7 +54,7 @@
         "auto_increment": false
       },
       {
-        "name": "department_id",
+        "name": "departments_id",
         "type": "INT",
         "constraints": [],
         "default": null,
@@ -197,7 +197,7 @@
         "id": 1,
         "name": "Alice Johnson",
         "salary": 7500,
-        "department_id": 1,
+        "departments_id": 1,
         "hire_date": "2023-01-15",
         "is_active": 1
       },
@@ -205,7 +205,7 @@
         "id": 2,
         "name": "Bob Smith",
         "salary": 6800,
-        "department_id": 1,
+        "departments_id": 1,
         "hire_date": "2023-03-20",
         "is_active": 1
       },
@@ -213,7 +213,7 @@
         "id": 3,
         "name": "Charlie Lee",
         "salary": 6200,
-        "department_id": 2,
+        "departments_id": 2,
         "hire_date": "2023-02-10",
         "is_active": 1
       },
@@ -221,7 +221,7 @@
         "id": 4,
         "name": "Diana Prince",
         "salary": 7100,
-        "department_id": 2,
+        "departments_id": 2,
         "hire_date": "2023-04-05",
         "is_active": 1
       },
@@ -229,7 +229,7 @@
         "id": 5,
         "name": "Eve Adams",
         "salary": 5500,
-        "department_id": 3,
+        "departments_id": 3,
         "hire_date": "2023-05-12",
         "is_active": 0
       }
