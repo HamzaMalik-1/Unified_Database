@@ -14,5 +14,8 @@
   "498a2acd036a16a234de3d5cc825edc7": "The command retrieves all columns for every record found within the 'us' table in a database system that uses SQL syntax.",
   "e2b899c15f24318eb63253fb01f9276b": "This command retrieves all records from the 'employees' table where their ID matches those listed in a subquery that selects IDs of active reviewers for each employee.",
   "e551305bed827ec5c9fd3c9593d82bfd": "This command retrieves all columns from the 'employees' table and combines them with corresponding column data in the 'salaries' table where each employee has a matching ID, showing both their details and current pay information together.",
-  "6412e558f8a0e93ce4c53ee2b4ebea11": "Retrieve all entries from the collection named \"documents\" where the document titled 'Annual Report' is present."
+  "6412e558f8a0e93ce4c53ee2b4ebea11": "Retrieve all entries from the collection named \"documents\" where the document titled 'Annual Report' is present.",
+  "58947baa2f86b0ad5b6a86294b20d652": "The command selects the names of employees who have led two or more different project titles by joining employee and assignment data with projects to count distinctly titled projects per leader, then filters for those leading at least two unique projects.",
+  "0c4299d30f5943a1dd3739998412bdca": "This command adds a new employee named Ali to the database with an initial salary of 3000 units of currency under department number one.",
+  "b661ce4aeb35d1b047fa4eb3cfdd88c4": "The command retrieves the names of all department records where their allocated budgets exceed $30,000."
 }

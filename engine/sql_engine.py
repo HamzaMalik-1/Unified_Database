@@ -8,16 +8,20 @@ from typing import Dict, List, Tuple, Any, Optional
 import re
 import json
 from utils.response import ResponseFactory, APIResponse
-
+from pathlib import Path
+import copy
+from transaction.log_manager import LogManager
 class SQLDatabase:
     def __init__(self, storage: Storage):
         self.storage = storage
+
+        # Initialize storage data structures if missing
         if 'indexes' not in self.storage.data:
             self.storage.data['indexes'] = {}
         if 'foreign_keys' not in self.storage.data:
             self.storage.data['foreign_keys'] = {}
         if 'check_constraints' not in self.storage.data:
-            self.storage.data['check_constraints'] = {}   # <-- FIXED
+            self.storage.data['check_constraints'] = {}
         if 'auto_increment' not in self.storage.data:
             self.storage.data['auto_increment'] = {}
         if 'views' not in self.storage.data:
@@ -27,6 +31,17 @@ class SQLDatabase:
         if 'triggers' not in self.storage.data:
             self.storage.data['triggers'] = []
         self.storage.save()
+
+        # Transaction attributes (must be defined before _recover_from_wal)
+        self.active_txn = None          # current txn_id (int) or None
+        self.txn_snapshot = None        # deep copy of storage.data at BEGIN
+        self.log_path = Path("data/sql_wal.log")
+        self.log = None                 # LogManager instance (created in begin)
+
+        # Crash recovery (reads WAL and replays committed transactions)
+        self._recover_from_wal()
+
+        # NoSQL engine reference (set later by the catalog)
         self.nosql_engine = None
 
     def set_nosql_engine(self, nosql_engine):
@@ -162,28 +177,30 @@ class SQLDatabase:
             return ResponseFactory.error(str(e), status=500)
 
     def _create_table(self, sql: str) -> str:
-            try:
-                parsed = SQLParser.parse_create_table(sql)
-                table_name = parsed["table_name"]
-                columns = parsed["columns"]
-                foreign_keys = parsed.get("foreign_keys", [])
-                checks = parsed.get("checks", [])                     # <-- ADDED
-                if self.storage.get_schema(table_name):
-                    return f"Error: Table '{table_name}' already exists"
-                self.storage.set_schema(table_name, columns)
-                self.storage.set_table_data(table_name, [])
-                self.storage.data['foreign_keys'][table_name] = foreign_keys
-                self.storage.data['check_constraints'][table_name] = checks   # <-- ADDED
-                for col in columns:
-                    if col.get('auto_increment'):
-                        self.storage.data['auto_increment'][table_name] = 0
-                        break
-                self.storage.save()
-                logger.info(f"Table '{table_name}' created with {len(foreign_keys)} foreign keys, {len(checks)} checks")
-                return f"Table '{table_name}' created successfully"
-            except Exception as e:
-                logger.error(f"CREATE TABLE failed: {e}")
-                return f"Error: {e}"
+        try:
+            if self.active_txn:
+                return "Error: DDL statements (CREATE TABLE) cannot be used inside a transaction"
+            parsed = SQLParser.parse_create_table(sql)
+            table_name = parsed["table_name"]
+            columns = parsed["columns"]
+            foreign_keys = parsed.get("foreign_keys", [])
+            checks = parsed.get("checks", [])
+            if self.storage.get_schema(table_name):
+                return f"Error: Table '{table_name}' already exists"
+            self.storage.set_schema(table_name, columns)
+            self.storage.set_table_data(table_name, [])
+            self.storage.data['foreign_keys'][table_name] = foreign_keys
+            self.storage.data['check_constraints'][table_name] = checks
+            for col in columns:
+                if col.get('auto_increment'):
+                    self.storage.data['auto_increment'][table_name] = 0
+                    break
+            self.storage.save()
+            logger.info(f"Table '{table_name}' created with {len(foreign_keys)} foreign keys, {len(checks)} checks")
+            return f"Table '{table_name}' created successfully"
+        except Exception as e:
+            logger.error(f"CREATE TABLE failed: {e}")
+            return f"Error: {e}"
 
     def _insert(self, sql: str) -> str:
         try:
@@ -272,7 +289,20 @@ class SQLDatabase:
                     return f"Error: Foreign key violation on {col_name}: value {col_val} not found"
 
             existing_rows.append(row)
-            self.storage.set_table_data(table_name, existing_rows)
+            # Use skip_save = True if we are inside a transaction (defer persistence until COMMIT)
+            skip = self.active_txn is not None
+            self.storage.set_table_data(table_name, existing_rows, skip_save=skip)
+
+            # Write to Write‑Ahead Log if inside a transaction
+            if self.active_txn:
+                self.log.write({
+                    "txn_id": self.active_txn,
+                    "op": "INSERT",
+                    "table": table_name,
+                    "row": row
+                })
+            # If not in a transaction, save immediately (skip_save was False, so save already happened inside set_table_data)
+
             logger.info(f"Inserted row into '{table_name}': {row}")
 
             # ---------- Fire AFTER INSERT triggers ----------
@@ -659,7 +689,6 @@ class SQLDatabase:
                 if match:
                     outer_column = match.group(1)
                     inner_nosql_sql = match.group(2).strip()
-                    # Execute NoSQL command (the inner SELECT without the NOSQL prefix)
                     resp = self.nosql_engine.execute(inner_nosql_sql)
                     if not resp.success:
                         return f"Error in cross-model subquery: {resp.message}"
@@ -669,10 +698,8 @@ class SQLDatabase:
                     elif resp.data.type == "json":
                         if isinstance(resp.data.content, list):
                             values = [list(item.values())[0] for item in resp.data.content if item]
-                    # Pre‑filter rows
                     rows = [r for r in rows if r.get(outer_column) in values]
                     where_cond = None
-            # -----------------------------------------------------------------
 
             # Validate column existence and types
             schema_cols = {col["name"]: col for col in schema}
@@ -681,10 +708,15 @@ class SQLDatabase:
                     return f"Error: Column '{col}' does not exist in table '{table_name}'"
 
             updated_count = 0
-            for row in rows:
+            log_records = []  # accumulate WAL records for this transaction
+
+            for idx, row in enumerate(rows):
                 # Check WHERE condition (if any left)
                 if where_cond and not self._evaluate_condition(row, where_cond):
                     continue
+
+                # Capture old row for WAL (before modifications)
+                old_row = row.copy()
 
                 # Apply updates to a copy to avoid partial updates if constraints fail
                 updated_row = row.copy()
@@ -709,16 +741,37 @@ class SQLDatabase:
                 # ---------- Fire BEFORE UPDATE trigger ----------
                 self._fire_triggers(table_name, "BEFORE", "UPDATE", old_row=row, new_row=updated_row)
 
-                # Apply the update to the real row
+                # Apply the update to the real row (in-place modification)
                 for col, val in set_assignments.items():
                     row[col] = updated_row[col]
 
                 # ---------- Fire AFTER UPDATE trigger ----------
                 self._fire_triggers(table_name, "AFTER", "UPDATE", old_row=row, new_row=updated_row)
 
+                # If inside a transaction, record the change for WAL
+                if self.active_txn:
+                    log_records.append({
+                        "txn_id": self.active_txn,
+                        "op": "UPDATE",
+                        "table": table_name,
+                        "old": old_row,
+                        "new": row.copy()
+                    })
+
                 updated_count += 1
 
-            self.storage.set_table_data(table_name, rows)
+            # After all updates, handle persistence and WAL
+            if self.active_txn:
+                # Write all accumulated update records to the Write-Ahead Log
+                for rec in log_records:
+                    self.log.write(rec)
+                # Do NOT call storage.save() – defer persistence until COMMIT.
+                # The in‑memory rows have already been updated (they are the same list referenced by storage),
+                # so no further action is needed.
+            else:
+                # Outside a transaction: save immediately
+                self.storage.set_table_data(table_name, rows)
+
             logger.info(f"Updated {updated_count} row(s) in '{table_name}'")
             return f"Update successful. {updated_count} row(s) affected."
         except Exception as e:
@@ -783,11 +836,29 @@ class SQLDatabase:
             for row in to_delete:
                 self._fire_triggers(table_name, "BEFORE", "DELETE", old_row=row)
 
+            # Collect WAL records if inside a transaction
+            log_records = []
+            if self.active_txn:
+                for row in to_delete:
+                    log_records.append({
+                        "txn_id": self.active_txn,
+                        "op": "DELETE",
+                        "table": table_name,
+                        "old": row.copy()
+                    })
+
             # Delete rows
             new_rows = [r for r in rows if r not in to_delete]
-            self.storage.set_table_data(table_name, new_rows)
+            # Use skip_save=True if inside a transaction (defer persistence until COMMIT)
+            skip = self.active_txn is not None
+            self.storage.set_table_data(table_name, new_rows, skip_save=skip)
 
-            # Fire AFTER DELETE triggers
+            # Write WAL records if in transaction
+            if self.active_txn and log_records:
+                for rec in log_records:
+                    self.log.write(rec)
+
+            # Fire AFTER DELETE triggers (must be done after the data is updated in memory)
             for row in to_delete:
                 self._fire_triggers(table_name, "AFTER", "DELETE", old_row=row)
 
@@ -796,7 +867,10 @@ class SQLDatabase:
                 for col_name, col_val in row.items():
                     self._handle_child_references(table_name, col_name, col_val, is_delete=True)
 
-            self.storage.save()
+            # Only save to disk if NOT in a transaction (otherwise save is deferred to COMMIT)
+            if not self.active_txn:
+                self.storage.save()
+
             logger.info(f"Deleted {len(to_delete)} row(s) from '{table_name}'")
             return f"Delete successful. {len(to_delete)} row(s) deleted."
         except Exception as e:
@@ -1184,6 +1258,8 @@ class SQLDatabase:
         
     def _alter_table(self, sql: str) -> str:
         try:
+            if self.active_txn:
+                return "Error: ALTER TABLE cannot be used inside a transaction"
             parsed = SQLParser.parse_alter_table(sql)
             table_name = parsed["table_name"]
             schema = self.storage.get_schema(table_name)
@@ -1935,3 +2011,157 @@ class SQLDatabase:
         except Exception as e:
             logger.error(f"Error evaluating EXISTS subquery: {e}")
             return False
+    
+        
+    def begin(self, txn_id: int = None):
+        if self.active_txn is not None:
+            raise Exception("Transaction already active")
+        if txn_id is None:
+            txn_id = self._next_txn_id()
+        self.active_txn = txn_id
+        # Take a deep copy of the entire storage.data (schemas + tables + indexes + ...)
+        self.txn_snapshot = copy.deepcopy(self.storage.data)
+        self.log = LogManager(self.log_path)
+        self.log.write({"txn_id": txn_id, "op": "BEGIN"})
+
+    def commit(self):
+        if self.active_txn is None:
+            raise Exception("No active transaction")
+        # Write COMMIT to WAL
+        self.log.write({"txn_id": self.active_txn, "op": "COMMIT"})
+        self.log.flush()
+        # Persist the current in‑memory data to disk (this is the only write)
+        self.storage.save()
+        # Clean up transaction state
+        self._clear_transaction()
+
+    def rollback(self):
+        if self.active_txn is None:
+            raise Exception("No active transaction")
+        # Restore the snapshot (discard all changes made during the transaction)
+        self.storage.data = self.txn_snapshot
+        # Write ROLLBACK to WAL (for audit, not strictly needed for recovery)
+        self.log.write({"txn_id": self.active_txn, "op": "ROLLBACK"})
+        self.log.flush()
+        self._clear_transaction()
+
+    def _clear_transaction(self):
+        self.active_txn = None
+        self.txn_snapshot = None
+        if self.log:
+            self.log.close()
+            self.log = None
+
+    def _next_txn_id(self) -> int:
+        # Simple increment from a file; for now, use timestamp or in‑memory counter
+        # You can store last_txn_id in a file or just use int(time.time()*1000)
+        import time
+        return int(time.time() * 1000)
+        
+        
+    def _recover_from_wal(self):
+        """
+        Replay committed transactions from the WAL on top of the current in‑memory data.
+        Assumes storage.data is already loaded from the JSON file.
+        """
+        log_path = Path("data/sql_wal.log")
+        if not log_path.exists():
+            return
+
+        committed_txns = set()
+        records = []          # list of all records in order
+
+        # First pass: read the log and record committed transaction IDs
+        with open(log_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                records.append(rec)
+                if rec.get("op") == "COMMIT":
+                    committed_txns.add(rec["txn_id"])
+
+        # Second pass: replay only INSERT/UPDATE/DELETE from committed transactions
+        for rec in records:
+            txn_id = rec.get("txn_id")
+            if txn_id not in committed_txns:
+                continue
+            op = rec.get("op")
+            if op == "INSERT":
+                self._apply_insert_recovery(rec["table"], rec["row"])
+            elif op == "UPDATE":
+                self._apply_update_recovery(rec["table"], rec["new"], rec["old"])
+            elif op == "DELETE":
+                self._apply_delete_recovery(rec["table"], rec["old"])
+            # BEGIN/COMMIT/ROLLBACK are not replayed
+
+        # After recovery, we can optionally truncate the log (but keep it for audit)
+            
+    def _recover_from_wal(self):
+        if not self.log_path.exists():
+            return
+
+        committed_txns = set()
+        records = []
+
+        with open(self.log_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                records.append(rec)
+                if rec.get("op") == "COMMIT":
+                    committed_txns.add(rec["txn_id"])
+
+        for rec in records:
+            if rec.get("txn_id") not in committed_txns:
+                continue
+            op = rec.get("op")
+            if op == "INSERT":
+                self._apply_insert_recovery(rec["table"], rec["row"])
+            elif op == "UPDATE":
+                self._apply_update_recovery(rec["table"], rec["new"], rec.get("old"))
+            elif op == "DELETE":
+                self._apply_delete_recovery(rec["table"], rec["old"])
+
+    def _apply_insert_recovery(self, table_name: str, row: dict):
+        rows = self.storage.get_table_data(table_name)
+        pk_col = self._get_primary_key_column(table_name)
+        if pk_col:
+            for existing in rows:
+                if existing.get(pk_col) == row.get(pk_col):
+                    return
+        rows.append(row)
+        self.storage.set_table_data(table_name, rows, skip_save=True)
+
+    def _apply_update_recovery(self, table_name: str, new_row: dict, old_row: dict = None):
+        rows = self.storage.get_table_data(table_name)
+        pk_col = self._get_primary_key_column(table_name) or "id"
+        for i, existing in enumerate(rows):
+            if existing.get(pk_col) == new_row.get(pk_col):
+                rows[i] = new_row
+                break
+        self.storage.set_table_data(table_name, rows, skip_save=True)
+
+    def _apply_delete_recovery(self, table_name: str, old_row: dict):
+        rows = self.storage.get_table_data(table_name)
+        pk_col = self._get_primary_key_column(table_name) or "id"
+        new_rows = [r for r in rows if r.get(pk_col) != old_row.get(pk_col)]
+        self.storage.set_table_data(table_name, new_rows, skip_save=True)
+
+    def _get_primary_key_column(self, table_name: str) -> str:
+        schema = self.storage.get_schema(table_name)
+        if not schema:
+            return None
+        for col in schema:
+            if "PRIMARY KEY" in col.get("constraints", []):
+                return col["name"]
+        return "id"

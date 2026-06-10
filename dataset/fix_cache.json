@@ -7,5 +7,14 @@
   "de9368a25ad17d4763603f25333f7427": "SQL SELECT * FROM product INNER JOIN order ON product.id = order.product_id WHERE NOT EXISTS (SELECT 1 FROM temp_table tt WHERE tt.id = product.id) AND product.categories IN ('Books') ORDER BY price ASC; -- Assuming 'temp_table' should not be joined and we want to filter products in the category of Books",
   "b72b40ad195aa94e8dad73e54615ed2a": "SQL INSERT INTO temp_table (id, name, age) VALUES ('2', 'sana', 15) -- Assuming the ID must be unique and incremented by one from a previous entry if necessary.",
   "674575fc8dcdcae5a97391c734f0a69a": "SQL SELECT * FROM employees WHERE is_active = 1",
-  "3e3a103b4dc11bf651666323c06bb198": "SQL SELECT * FROM employees WHERE is_active = TRUE; -- Assuming the intent was to select active employees. If a specific column or condition were needed instead of '*', it should be specified accordingly."
+  "3e3a103b4dc11bf651666323c06bb198": "SQL SELECT * FROM employees WHERE is_active = TRUE; -- Assuming the intent was to select active employees. If a specific column or condition were needed instead of '*', it should be specified accordingly.",
+  "be09a2278837585acfc6e60573073ebc": "SQL SELECT * FROM employees WHERE is_active = 1; -- Assuming we want active employees. Adjust the condition as needed for your specific requirement.",
+  "d80562c5920dc3b3cb64fddf4938bda9": "SQL INSERT INTO projects(title, budget) VALUES ('new_project', 4334)",
+  "fa1cc6772472e5d0c00d319e826f08de": "SQL SELECT * FROM employees INNER JOIN salaries ON employees.id = salaries.employee_id",
+  "3e22d03b80ce76ac1e7f4268e8a1b301": "SQL SELECT * FROM employees WHERE salary > 3000",
+  "5c315c4d501cf77aaa30620afb46d824": "NOSQL SELECT * FROM employees WHERE is_active = true",
+  "a920f7a6c8a7bdb33114e693807c850a": "NOSQL SELECT * FROM activities WHERE type = 'login' AND userId = 12345",
+  "2406775036f98d66783ba6c1aff2d65d": "SQL SELECT * FROM project",
+  "b43b66afabd486578589c4255fe6cd18": "SQL SELECT * FROM departments WHERE budget < 1000",
+  "1bd9ca48c9b5cdc6192a37164151594b": "SQL SELECT * FROM salaries WHERE amount < 1000"
 }

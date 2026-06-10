@@ -88,7 +88,7 @@ class NLPProcessor:
 
     def process(self, text: str) -> Optional[str]:
         normalised = self._normalise(text)
-        is_short = len(text) <= 30     # treat sentences of 20 characters or fewer as "short"
+        is_short = len(text) <= 45     # treat sentences of 20 characters or fewer as "short"
         # is_short = len(text) <= 75     # treat sentences of 20 characters or fewer as "short"
         
         if is_short:
@@ -905,7 +905,7 @@ class NLPProcessor:
                 response = client.post(
                     OLLAMA_URL,          # ✅ correct – OLLAMA_URL already includes /api/generate
                     json={
-                        "model": EXPLAIN_MODEL,   # ✅ base model (phi35:latest)
+                        "model": OLLAMA_MODEL,   # ✅ base model (phi35:latest)
                         "prompt": full_prompt,
                         "stream": False,
                         "options": {

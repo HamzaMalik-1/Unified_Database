@@ -25,6 +25,14 @@
         "constraints": [],
         "default": null,
         "auto_increment": false
+      },
+      {
+        "name": "COLUMN",
+        "type": "RATING",
+        "constraints": [
+          "DECIMAL(3,2);"
+        ],
+        "default": null
       }
     ]
   },
@@ -33,7 +41,8 @@
       {
         "id": 1,
         "name": "atomic_habit",
-        "price": 200.0
+        "price": 200.0,
+        "COLUMN": null
       }
     ]
   },

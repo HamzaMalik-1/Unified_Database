@@ -85,23 +85,61 @@
         "default": null,
         "auto_increment": false
       }
+    ],
+    "users": [
+      {
+        "name": "id",
+        "type": "INT",
+        "constraints": [
+          "PRIMARY KEY"
+        ],
+        "default": null,
+        "auto_increment": false
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "constraints": [],
+        "default": null,
+        "auto_increment": false
+      }
     ]
   },
   "tables": {
     "orders": [],
     "product": [],
-    "books": []
+    "books": [],
+    "users": [
+      {
+        "id": 1,
+        "name": "Alice"
+      },
+      {
+        "id": 15,
+        "name": "avc"
+      },
+      {
+        "id": 16,
+        "name": "Alicia"
+      },
+      {
+        "id": 2,
+        "name": "Bob"
+      }
+    ]
   },
   "indexes": {},
   "foreign_keys": {
     "orders": [],
     "product": [],
-    "books": []
+    "books": [],
+    "users": []
   },
   "check_constraints": {
     "orders": [],
     "product": [],
-    "books": []
+    "books": [],
+    "users": []
   },
   "auto_increment": {
     "books": 0

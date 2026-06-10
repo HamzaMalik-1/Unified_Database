@@ -5,7 +5,10 @@ from loguru import logger
 from typing import Dict, Any, List, Tuple, Optional
 import json
 import re
+import copy
+from pathlib import Path
 from utils.response import ResponseFactory, APIResponse
+from transaction.log_manager import LogManager   # new import
 
 class NoSQLDatabase:
     def __init__(self, storage: Storage):
@@ -18,6 +21,129 @@ class NoSQLDatabase:
             self.storage.data['text_indexes'] = {}
         self.storage.save()
 
+        # Transaction attributes
+        self.active_txn = None          # current txn_id (int) or None
+        self.txn_snapshot = None        # deep copy of storage.data at BEGIN
+        self.log_path = Path("data/nosql_wal.log")
+        self.log = None                 # LogManager instance (created in begin)
+
+        # Recover from WAL on startup
+        self._recover_from_wal()
+
+    # ------------------------------------------------------------------
+    # Transaction support (mirroring SQL engine)
+    # ------------------------------------------------------------------
+    def begin(self, txn_id: int = None):
+        if self.active_txn is not None:
+            raise Exception("Transaction already active")
+        if txn_id is None:
+            txn_id = self._next_txn_id()
+        self.active_txn = txn_id
+        self.txn_snapshot = copy.deepcopy(self.storage.data)
+        self.log = LogManager(self.log_path)
+        self.log.write({"txn_id": txn_id, "op": "BEGIN"})
+
+    def commit(self):
+        if self.active_txn is None:
+            raise Exception("No active transaction")
+        self.log.write({"txn_id": self.active_txn, "op": "COMMIT"})
+        self.log.flush()
+        self.storage.save()   # persist all changes
+        self._clear_transaction()
+
+    def rollback(self):
+        if self.active_txn is None:
+            raise Exception("No active transaction")
+        # Restore snapshot
+        self.storage.data = self.txn_snapshot
+        self.log.write({"txn_id": self.active_txn, "op": "ROLLBACK"})
+        self.log.flush()
+        self._clear_transaction()
+
+    def _clear_transaction(self):
+        self.active_txn = None
+        self.txn_snapshot = None
+        if self.log:
+            self.log.close()
+            self.log = None
+
+    def _next_txn_id(self) -> int:
+        import time
+        return int(time.time() * 1000)
+
+    # ------------------------------------------------------------------
+    # Crash recovery from WAL
+    # ------------------------------------------------------------------
+    def _recover_from_wal(self):
+        if not self.log_path.exists():
+            return
+
+        committed_txns = set()
+        records = []
+
+        # First pass: read all records, mark committed transactions
+        with open(self.log_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                records.append(rec)
+                if rec.get("op") == "COMMIT":
+                    committed_txns.add(rec["txn_id"])
+
+        # Second pass: replay INSERT/UPDATE/DELETE from committed txns
+        for rec in records:
+            txn_id = rec.get("txn_id")
+            if txn_id not in committed_txns:
+                continue
+            op = rec.get("op")
+            if op == "INSERT":
+                self._apply_insert_recovery(rec["collection"], rec["doc"])
+            elif op == "UPDATE":
+                self._apply_update_recovery(rec["collection"], rec["new"], rec.get("old"))
+            elif op == "DELETE":
+                self._apply_delete_recovery(rec["collection"], rec["old"])
+
+    def _get_doc_id(self, doc: dict) -> Any:
+        """Extract unique identifier from a document (prefer '_id' or 'id', else use whole doc as fallback)."""
+        if "_id" in doc:
+            return doc["_id"]
+        if "id" in doc:
+            return doc["id"]
+        # Fallback: use a hash of the document (acceptable for lab project)
+        return hash(json.dumps(doc, sort_keys=True))
+
+    def _apply_insert_recovery(self, collection: str, doc: dict):
+        docs = self.storage.data['collections'].get(collection, [])
+        doc_id = self._get_doc_id(doc)
+        # Avoid duplicate if already present
+        for existing in docs:
+            if self._get_doc_id(existing) == doc_id:
+                return
+        docs.append(doc)
+        self.storage.data['collections'][collection] = docs
+        # Indexes will be rebuilt later (or we can update lazily). For simplicity, we just restore data.
+
+    def _apply_update_recovery(self, collection: str, new_doc: dict, old_doc: dict = None):
+        docs = self.storage.data['collections'].get(collection, [])
+        doc_id = self._get_doc_id(new_doc)
+        for i, existing in enumerate(docs):
+            if self._get_doc_id(existing) == doc_id:
+                docs[i] = new_doc
+                break
+        self.storage.data['collections'][collection] = docs
+
+    def _apply_delete_recovery(self, collection: str, old_doc: dict):
+        docs = self.storage.data['collections'].get(collection, [])
+        doc_id = self._get_doc_id(old_doc)
+        new_docs = [d for d in docs if self._get_doc_id(d) != doc_id]
+        self.storage.data['collections'][collection] = new_docs
+
+    # ---------- Main execute method (unchanged) ----------
     def execute(self, command: str) -> APIResponse:
         cmd_upper = command.strip().upper()
         try:
@@ -91,14 +217,16 @@ class NoSQLDatabase:
             logger.error(f"NoSQL execution failed: {e}")
             return ResponseFactory.error(str(e), status=500)
 
-    # ---------- Collection management ----------
+    # ---------- Collection management (auto‑commit) ----------
     def _create_collection(self, sql: str) -> str:
         try:
             name = NoSQLParser.parse_create_collection(sql)
             if name in self.storage.data['collections']:
                 return f"Collection '{name}' already exists"
             self.storage.data['collections'][name] = []
-            self.storage.save()
+            # Only save immediately if not in a transaction (auto‑commit)
+            if not self.active_txn:
+                self.storage.save()
             logger.info(f"Created collection '{name}'")
             return f"Collection '{name}' created"
         except Exception as e:
@@ -118,14 +246,16 @@ class NoSQLDatabase:
             for idx in to_del_text:
                 del self.storage.data['text_indexes'][idx]
             del self.storage.data['collections'][name]
-            self.storage.save()
+            # Only save immediately if not in a transaction (auto‑commit)
+            if not self.active_txn:
+                self.storage.save()
             logger.info(f"Dropped collection '{name}'")
             return f"Collection '{name}' dropped successfully"
         except Exception as e:
             logger.error(f"DROP COLLECTION failed: {e}")
             return f"Error: {e}"
 
-    # ---------- CRUD operations with index maintenance ----------
+    # ---------- CRUD operations with transaction support ----------
     def _insert(self, sql: str) -> str:
         try:
             parsed = NoSQLParser.parse_insert(sql)
@@ -133,6 +263,15 @@ class NoSQLDatabase:
             doc = parsed["doc"]
             if coll not in self.storage.data['collections']:
                 return f"Error: Collection '{coll}' does not exist. Create it first."
+
+            # Add a unique ID if missing
+            if "_id" not in doc and "id" not in doc:
+                # Generate a simple auto‑increment ID per collection
+                docs = self.storage.data['collections'][coll]
+                next_id = len(docs) + 1
+                doc["id"] = next_id
+
+            # Perform insert in memory
             self.storage.data['collections'][coll].append(doc)
             new_idx = len(self.storage.data['collections'][coll]) - 1
 
@@ -155,7 +294,18 @@ class NoSQLDatabase:
                         for word in words:
                             inverted.setdefault(word, []).append(new_idx)
 
-            self.storage.save()
+            # Write WAL entry if inside a transaction
+            if self.active_txn:
+                self.log.write({
+                    "txn_id": self.active_txn,
+                    "op": "INSERT",
+                    "collection": coll,
+                    "doc": doc
+                })
+                # Do NOT save to disk – defer to commit
+            else:
+                self.storage.save()
+
             logger.info(f"Inserted document into '{coll}': {doc}")
             return "Insert successful"
         except Exception as e:
@@ -173,6 +323,8 @@ class NoSQLDatabase:
                 return f"Error: Collection '{coll}' does not exist"
             docs = self.storage.data['collections'][coll]
             updated = 0
+            log_records = []   # collect WAL entries for this transaction
+
             for idx, doc in enumerate(docs):
                 # Evaluate WHERE condition
                 if where is not None:
@@ -233,12 +385,28 @@ class NoSQLDatabase:
                             if new_val is not None:
                                 index_map.setdefault(new_val, []).append(idx)
 
+                # If inside a transaction, record the change
+                if self.active_txn:
+                    log_records.append({
+                        "txn_id": self.active_txn,
+                        "op": "UPDATE",
+                        "collection": coll,
+                        "old": old_doc,
+                        "new": doc.copy()
+                    })
                 updated += 1
 
             # Rebuild text indexes for this collection (simple but correct)
             self._rebuild_text_indexes_for_collection(coll)
 
-            self.storage.save()
+            # Write WAL records if in transaction
+            if self.active_txn and log_records:
+                for rec in log_records:
+                    self.log.write(rec)
+                # Do NOT save to disk – defer to commit
+            else:
+                self.storage.save()
+
             return f"Update successful. {updated} document(s) updated."
         except Exception as e:
             logger.error(f"UPDATE failed: {e}")
@@ -250,30 +418,46 @@ class NoSQLDatabase:
             coll = parsed["collection"]
             where_field = parsed["where_field"]
             where_value = parsed["where_value"]
+
             if coll not in self.storage.data['collections']:
                 return f"Error: Collection '{coll}' does not exist"
             docs = self.storage.data['collections'][coll]
+
             if where_field is None:
                 # Delete all documents
+                to_delete_docs = docs[:]
+                self.storage.data['collections'][coll] = []
+                # Clear indexes
                 for idx_name, idx_info in self.storage.data['nosql_indexes'].items():
                     if idx_info["collection"] == coll:
                         idx_info["map"].clear()
                 for idx_name, idx_info in self.storage.data['text_indexes'].items():
                     if idx_info["collection"] == coll:
                         idx_info["inverted"].clear()
-                self.storage.data['collections'][coll] = []
-                self.storage.save()
-                return f"Delete successful. {len(docs)} document(s) deleted."
+                # WAL: if in transaction, log each deleted document
+                if self.active_txn:
+                    for doc in to_delete_docs:
+                        self.log.write({
+                            "txn_id": self.active_txn,
+                            "op": "DELETE",
+                            "collection": coll,
+                            "old": doc
+                        })
+                if not self.active_txn:
+                    self.storage.save()
+                return f"Delete successful. {len(to_delete_docs)} document(s) deleted."
             else:
                 # Find indices to delete
-                to_delete = []
+                to_delete_docs = []
+                to_delete_indices = []
                 for idx, doc in enumerate(docs):
                     doc_val = self._get_nested(doc, where_field)
                     if doc_val == where_value:
-                        to_delete.append(idx)
+                        to_delete_indices.append(idx)
+                        to_delete_docs.append(doc)
 
                 # Remove documents
-                new_docs = [doc for i, doc in enumerate(docs) if i not in to_delete]
+                new_docs = [doc for i, doc in enumerate(docs) if i not in to_delete_indices]
                 self.storage.data['collections'][coll] = new_docs
 
                 # Rebuild equality indexes for this collection
@@ -290,13 +474,25 @@ class NoSQLDatabase:
                 # Rebuild text indexes for this collection
                 self._rebuild_text_indexes_for_collection(coll)
 
-                self.storage.save()
-                return f"Delete successful. {len(to_delete)} document(s) deleted."
+                # Write WAL records if in transaction
+                if self.active_txn:
+                    for doc in to_delete_docs:
+                        self.log.write({
+                            "txn_id": self.active_txn,
+                            "op": "DELETE",
+                            "collection": coll,
+                            "old": doc
+                        })
+                    # Do NOT save to disk – defer to commit
+                else:
+                    self.storage.save()
+
+                return f"Delete successful. {len(to_delete_docs)} document(s) deleted."
         except Exception as e:
             logger.error(f"DELETE failed: {e}")
             return f"Error: {e}"
 
-   # ---------- SELECT with index usage ----------
+   # ---------- SELECT with index usage (unchanged) ----------
     def _select(self, sql: str) -> str:
         try:
             parsed = NoSQLParser.parse_select(sql)
@@ -748,9 +944,7 @@ class NoSQLDatabase:
                             inverted.setdefault(word, []).append(idx)
                 idx_info["inverted"] = inverted
         self.storage.save()
-        
-        
-            
+
     # ---------- Statistics ----------
     def get_stats(self) -> Dict[str, Any]:
         collections = self.storage.data.get('collections', {})

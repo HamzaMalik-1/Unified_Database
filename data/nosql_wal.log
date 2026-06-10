@@ -1,0 +1,7 @@
+{"txn_id": 1781104161339, "op": "BEGIN"}
+{"txn_id": 1781104161339, "op": "INSERT", "collection": "profiles", "doc": {"user_id": 1, "bio": "Hello", "id": 1}}
+{"txn_id": 1781104161339, "op": "ROLLBACK"}
+{"txn_id": 1781104226588, "op": "BEGIN"}
+{"txn_id": 1781104226588, "op": "INSERT", "collection": "profiles", "doc": {"user_id": 2, "bio": "World", "id": 1}}
+{"txn_id": 1781104226588, "op": "INSERT", "collection": "profiles", "doc": {"user_id": 2, "bio": "World", "id": 2}}
+{"txn_id": 1781104226588, "op": "COMMIT"}

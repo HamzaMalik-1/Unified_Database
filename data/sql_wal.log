@@ -1,0 +1,20 @@
+{"txn_id": 1781101325382, "op": "BEGIN"}
+{"txn_id": 1781101325382, "op": "INSERT", "table": "books", "row": {"id": 99, "name": "Test", "price": null}}
+{"txn_id": 1781101325382, "op": "ROLLBACK"}
+{"txn_id": 1781102039863, "op": "BEGIN"}
+{"txn_id": 1781102039863, "op": "INSERT", "table": "users", "row": {"id": 1, "name": "Alice"}}
+{"txn_id": 1781102039863, "op": "COMMIT"}
+{"txn_id": 1781102142137, "op": "BEGIN"}
+{"txn_id": 1781102348998, "op": "BEGIN"}
+{"txn_id": 1781102348998, "op": "COMMIT"}
+{"txn_id": 1781102601740, "op": "BEGIN"}
+{"txn_id": 1781102903591, "op": "BEGIN"}
+{"txn_id": 1781102903591, "op": "INSERT", "table": "users", "row": {"id": 15, "name": "avc"}}
+{"txn_id": 1781102903591, "op": "COMMIT"}
+{"txn_id": 1781104080702, "op": "BEGIN"}
+{"txn_id": 1781104080702, "op": "INSERT", "table": "users", "row": {"id": 16, "name": "Alice"}}
+{"txn_id": 1781104080702, "op": "UPDATE", "table": "users", "old": {"id": 16, "name": "Alice"}, "new": {"id": 16, "name": "Alicia"}}
+{"txn_id": 1781104080702, "op": "COMMIT"}
+{"txn_id": 1781104226588, "op": "BEGIN"}
+{"txn_id": 1781104226588, "op": "INSERT", "table": "users", "row": {"id": 2, "name": "Bob"}}
+{"txn_id": 1781104226588, "op": "COMMIT"}

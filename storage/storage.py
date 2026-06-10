@@ -1,3 +1,4 @@
+# backend/storage/storage.py
 import json
 import os
 
@@ -13,7 +14,6 @@ class Storage:
                 with open(self.filename, 'r') as f:
                     self.data = json.load(f)
             except (json.JSONDecodeError, IOError):
-                # File exists but is empty or corrupt – start fresh
                 self.data = {"schemas": {}, "tables": {}}
         else:
             self.data = {"schemas": {}, "tables": {}}
@@ -32,6 +32,7 @@ class Storage:
     def get_table_data(self, table_name: str):
         return self.data["tables"].get(table_name, [])
 
-    def set_table_data(self, table_name: str, rows):
+    def set_table_data(self, table_name: str, rows, skip_save: bool = False):
         self.data["tables"][table_name] = rows
-        self.save()
+        if not skip_save:
+            self.save()
