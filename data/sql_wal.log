@@ -18,3 +18,6 @@
 {"txn_id": 1781104226588, "op": "BEGIN"}
 {"txn_id": 1781104226588, "op": "INSERT", "table": "users", "row": {"id": 2, "name": "Bob"}}
 {"txn_id": 1781104226588, "op": "COMMIT"}
+{"txn_id": 1781105973925, "op": "BEGIN"}
+{"txn_id": 1781105973925, "op": "INSERT", "table": "books", "row": {"id": 23, "name": "\"abc\"", "price": 5454.0}}
+{"txn_id": 1781105973925, "op": "COMMIT"}

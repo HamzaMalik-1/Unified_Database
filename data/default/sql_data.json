@@ -1,114 +1,6 @@
 {
-  "schemas": {
-    "orders": [
-      {
-        "name": "id",
-        "type": "INT",
-        "constraints": [
-          "PRIMARY KEY"
-        ],
-        "default": null,
-        "auto_increment": false
-      },
-      {
-        "name": "name",
-        "type": "TEXT",
-        "constraints": [],
-        "default": null,
-        "auto_increment": false
-      }
-    ],
-    "product": [
-      {
-        "name": "id",
-        "type": "INT",
-        "constraints": [
-          "PRIMARY KEY"
-        ],
-        "default": null,
-        "auto_increment": false
-      },
-      {
-        "name": "name",
-        "type": "TEXT",
-        "constraints": [
-          "NOT NULL"
-        ],
-        "default": null,
-        "auto_increment": false
-      },
-      {
-        "name": "amount",
-        "type": "REAL",
-        "constraints": [],
-        "default": null,
-        "auto_increment": false
-      },
-      {
-        "name": "categories",
-        "type": "TEXT",
-        "constraints": [],
-        "default": null,
-        "auto_increment": false
-      },
-      {
-        "name": "price",
-        "type": "REAL",
-        "constraints": [],
-        "default": null,
-        "auto_increment": false
-      }
-    ],
-    "books": [
-      {
-        "name": "id",
-        "type": "INT",
-        "constraints": [
-          "PRIMARY KEY"
-        ],
-        "default": null,
-        "auto_increment": true
-      },
-      {
-        "name": "name",
-        "type": "TEXT",
-        "constraints": [
-          "NOT NULL"
-        ],
-        "default": null,
-        "auto_increment": false
-      },
-      {
-        "name": "price",
-        "type": "REAL",
-        "constraints": [],
-        "default": null,
-        "auto_increment": false
-      }
-    ],
-    "users": [
-      {
-        "name": "id",
-        "type": "INT",
-        "constraints": [
-          "PRIMARY KEY"
-        ],
-        "default": null,
-        "auto_increment": false
-      },
-      {
-        "name": "name",
-        "type": "TEXT",
-        "constraints": [],
-        "default": null,
-        "auto_increment": false
-      }
-    ]
-  },
+  "schemas": {},
   "tables": {
-    "orders": [],
-    "product": [],
-    "books": [],
     "users": [
       {
         "id": 1,
@@ -125,25 +17,41 @@
       {
         "id": 2,
         "name": "Bob"
+      },
+      {
+        "id": 1,
+        "name": "Alice"
+      },
+      {
+        "id": 15,
+        "name": "avc"
+      },
+      {
+        "id": 16,
+        "name": "Alice"
+      },
+      {
+        "id": 2,
+        "name": "Bob"
+      }
+    ],
+    "books": [
+      {
+        "id": 23,
+        "name": "\"abc\"",
+        "price": 5454.0
+      },
+      {
+        "id": 23,
+        "name": "\"abc\"",
+        "price": 5454.0
       }
     ]
   },
   "indexes": {},
-  "foreign_keys": {
-    "orders": [],
-    "product": [],
-    "books": [],
-    "users": []
-  },
-  "check_constraints": {
-    "orders": [],
-    "product": [],
-    "books": [],
-    "users": []
-  },
-  "auto_increment": {
-    "books": 0
-  },
+  "foreign_keys": {},
+  "check_constraints": {},
+  "auto_increment": {},
   "views": {},
   "procedures": {},
   "triggers": []

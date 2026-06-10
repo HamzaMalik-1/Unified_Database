@@ -108,6 +108,9 @@ class NoSQLDatabase:
             elif op == "DELETE":
                 self._apply_delete_recovery(rec["collection"], rec["old"])
 
+        # Persist the recovered state to disk
+        self.storage.save()
+
     def _get_doc_id(self, doc: dict) -> Any:
         """Extract unique identifier from a document (prefer '_id' or 'id', else use whole doc as fallback)."""
         if "_id" in doc:

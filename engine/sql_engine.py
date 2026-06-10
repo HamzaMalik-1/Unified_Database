@@ -2059,48 +2059,50 @@ class SQLDatabase:
         return int(time.time() * 1000)
         
         
-    def _recover_from_wal(self):
-        """
-        Replay committed transactions from the WAL on top of the current in‑memory data.
-        Assumes storage.data is already loaded from the JSON file.
-        """
-        log_path = Path("data/sql_wal.log")
-        if not log_path.exists():
-            return
+    # def _recover_from_wal(self):
+    #     if not self.log_path.exists():
+    #         return
+    #     """
+    #     Replay committed transactions from the WAL on top of the current in‑memory data.
+    #     Assumes storage.data is already loaded from the JSON file.
+    #     """
+    #     log_path = Path("data/sql_wal.log")
+    #     if not log_path.exists():
+    #         return
 
-        committed_txns = set()
-        records = []          # list of all records in order
+    #     committed_txns = set()
+    #     records = []          # list of all records in order
 
-        # First pass: read the log and record committed transaction IDs
-        with open(log_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                records.append(rec)
-                if rec.get("op") == "COMMIT":
-                    committed_txns.add(rec["txn_id"])
+    #     # First pass: read the log and record committed transaction IDs
+    #     with open(log_path, "r", encoding="utf-8") as f:
+    #         for line in f:
+    #             line = line.strip()
+    #             if not line:
+    #                 continue
+    #             try:
+    #                 rec = json.loads(line)
+    #             except json.JSONDecodeError:
+    #                 continue
+    #             records.append(rec)
+    #             if rec.get("op") == "COMMIT":
+    #                 committed_txns.add(rec["txn_id"])
 
-        # Second pass: replay only INSERT/UPDATE/DELETE from committed transactions
-        for rec in records:
-            txn_id = rec.get("txn_id")
-            if txn_id not in committed_txns:
-                continue
-            op = rec.get("op")
-            if op == "INSERT":
-                self._apply_insert_recovery(rec["table"], rec["row"])
-            elif op == "UPDATE":
-                self._apply_update_recovery(rec["table"], rec["new"], rec["old"])
-            elif op == "DELETE":
-                self._apply_delete_recovery(rec["table"], rec["old"])
-            # BEGIN/COMMIT/ROLLBACK are not replayed
+    #     # Second pass: replay only INSERT/UPDATE/DELETE from committed transactions
+    #     for rec in records:
+    #         txn_id = rec.get("txn_id")
+    #         if txn_id not in committed_txns:
+    #             continue
+    #         op = rec.get("op")
+    #         if op == "INSERT":
+    #             self._apply_insert_recovery(rec["table"], rec["row"])
+    #         elif op == "UPDATE":
+    #             self._apply_update_recovery(rec["table"], rec["new"], rec["old"])
+    #         elif op == "DELETE":
+    #             self._apply_delete_recovery(rec["table"], rec["old"])
+    #         # BEGIN/COMMIT/ROLLBACK are not replayed
 
-        # After recovery, we can optionally truncate the log (but keep it for audit)
-            
+    #     # After recovery, we can optionally truncate the log (but keep it for audit)
+                
     def _recover_from_wal(self):
         if not self.log_path.exists():
             return
@@ -2132,13 +2134,16 @@ class SQLDatabase:
             elif op == "DELETE":
                 self._apply_delete_recovery(rec["table"], rec["old"])
 
+        # After replay, persist the recovered state to disk
+        self.storage.save()
+
     def _apply_insert_recovery(self, table_name: str, row: dict):
         rows = self.storage.get_table_data(table_name)
         pk_col = self._get_primary_key_column(table_name)
         if pk_col:
             for existing in rows:
                 if existing.get(pk_col) == row.get(pk_col):
-                    return
+                    return  # already present
         rows.append(row)
         self.storage.set_table_data(table_name, rows, skip_save=True)
 
@@ -2164,4 +2169,4 @@ class SQLDatabase:
         for col in schema:
             if "PRIMARY KEY" in col.get("constraints", []):
                 return col["name"]
-        return "id"
+        return "id"   # fallback

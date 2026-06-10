@@ -1,7 +1,20 @@
 {
   "schemas": {},
   "tables": {},
-  "collections": {},
+  "collections": {
+    "profiles": [
+      {
+        "user_id": 2,
+        "bio": "World",
+        "id": 1
+      },
+      {
+        "user_id": 2,
+        "bio": "World",
+        "id": 2
+      }
+    ]
+  },
   "nosql_indexes": {},
   "text_indexes": {}
 }
