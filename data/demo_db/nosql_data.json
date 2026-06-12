@@ -4,17 +4,6 @@
   "collections": {
     "employee_reviews": [
       {
-        "employee_id": 1,
-        "review_date": "2025-06-01",
-        "reviewer": "manager",
-        "ratings": {
-          "communication": 4.5,
-          "technical_skills": 5.0,
-          "teamwork": 4.0
-        },
-        "comments": "Excellent performance on project X."
-      },
-      {
         "employee_id": 2,
         "review_date": "2025-05-15",
         "reviewer": "manager",
@@ -28,7 +17,7 @@
       {
         "employee_id": 3,
         "review_date": "2025-06-10",
-        "reviewer": "lead",
+        "reviewer": "manager",
         "ratings": {
           "communication": 4.0,
           "technical_skills": 3.5,
@@ -104,14 +93,11 @@
       "collection": "employee_reviews",
       "field": "ratings.communication",
       "map": {
-        "4.5": [
+        "3.8": [
           0
         ],
-        "3.8": [
-          1
-        ],
         "4.0": [
-          2
+          1
         ]
       }
     }

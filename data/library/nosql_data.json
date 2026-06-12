@@ -2,7 +2,6 @@
   "schemas": {},
   "tables": {},
   "collections": {
-    "logs": [],
     "profiles": [
       {
         "user_id": 2,
@@ -12,6 +11,24 @@
       {
         "user_id": 2,
         "bio": "World",
+        "id": 2
+      }
+    ],
+    "logs": [
+      {
+        "comment": "first logs add",
+        "user_detail": {
+          "user_id": 1,
+          "name": "ali"
+        },
+        "id": 1
+      },
+      {
+        "array": [
+          1,
+          2,
+          3
+        ],
         "id": 2
       }
     ]

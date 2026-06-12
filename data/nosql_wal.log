@@ -5,3 +5,9 @@
 {"txn_id": 1781104226588, "op": "INSERT", "collection": "profiles", "doc": {"user_id": 2, "bio": "World", "id": 1}}
 {"txn_id": 1781104226588, "op": "INSERT", "collection": "profiles", "doc": {"user_id": 2, "bio": "World", "id": 2}}
 {"txn_id": 1781104226588, "op": "COMMIT"}
+{"txn_id": 1781246905403, "op": "BEGIN"}
+{"txn_id": 1781246905403, "op": "INSERT", "collection": "logs", "doc": {"array": [1, 2, 3], "id": 2}}
+{"txn_id": 1781246905403, "op": "COMMIT"}
+{"txn_id": 1781246993712, "op": "BEGIN"}
+{"txn_id": 1781246993712, "op": "INSERT", "collection": "logs", "doc": {"data": "hello from logs", "id": 3}}
+{"txn_id": 1781246993712, "op": "ROLLBACK"}

@@ -1,6 +1,6 @@
 {
   "schemas": {
-    "book": [
+    "books": [
       {
         "name": "id",
         "type": "INT",
@@ -25,26 +25,10 @@
         "constraints": [],
         "default": null,
         "auto_increment": false
-      },
-      {
-        "name": "COLUMN",
-        "type": "RATING",
-        "constraints": [
-          "DECIMAL(3,2);"
-        ],
-        "default": null
       }
     ]
   },
   "tables": {
-    "book": [
-      {
-        "id": 1,
-        "name": "atomic_habit",
-        "price": 200.0,
-        "COLUMN": null
-      }
-    ],
     "users": [
       {
         "id": 1,
@@ -113,26 +97,21 @@
     ],
     "books": [
       {
-        "id": 23,
-        "name": "\"abc\"",
-        "price": 5454.0
-      },
-      {
-        "id": 23,
-        "name": "\"abc\"",
-        "price": 5454.0
+        "id": 1,
+        "name": "atomic_habit",
+        "price": 200.0
       }
     ]
   },
   "indexes": {},
   "foreign_keys": {
-    "book": []
+    "books": []
   },
   "check_constraints": {
-    "book": []
+    "books": []
   },
   "auto_increment": {
-    "book": 1
+    "books": 1
   },
   "views": {},
   "procedures": {},

@@ -753,23 +753,60 @@ class NoSQLDatabase:
             else:
                 return False
 
-        # Then handle standard operators
+        # Then handle standard operators with None‑safe logic and type coercion
         match = re.match(r'^([\w.]+)\s*([=<>!]+)\s*(.+)$', cond)
         if not match:
             return False
         field = match.group(1).strip()
         operator = match.group(2).strip()
         right_raw = match.group(3).strip()
-        if right_raw.startswith("'") and right_raw.endswith("'"):
+
+        # Parse right‑hand value (string, number, or null)
+        if right_raw.upper() == "NULL":
+            right_val = None
+        elif right_raw.startswith("'") and right_raw.endswith("'"):
             right_val = right_raw[1:-1]
         elif right_raw.isdigit():
             right_val = int(right_raw)
         else:
             try:
                 right_val = float(right_raw)
-            except:
+            except ValueError:
                 right_val = right_raw
+
         left_val = self._get_nested(doc, field)
+
+        # ----- Handle None (missing value) -----
+        if left_val is None:
+            # For equality: True only if right is also None
+            if operator in ("=", "=="):
+                return right_val is None
+            # For inequality: True if right is not None
+            elif operator == "!=":
+                return right_val is not None
+            # For comparison operators (>, <, >=, <=): False (cannot compare None)
+            else:
+                return False
+
+        # ----- Type coercion for numeric comparisons -----
+        # Convert string representation of numbers to actual numbers
+        if isinstance(left_val, str) and left_val.lstrip('-').isdigit():
+            left_val = int(left_val)
+        elif isinstance(left_val, str):
+            try:
+                left_val = float(left_val)
+            except ValueError:
+                pass
+
+        if isinstance(right_val, str) and right_val.lstrip('-').isdigit():
+            right_val = int(right_val)
+        elif isinstance(right_val, str):
+            try:
+                right_val = float(right_val)
+            except ValueError:
+                pass
+
+        # Perform comparison
         if operator == "=" or operator == "==":
             return left_val == right_val
         elif operator == "!=":
